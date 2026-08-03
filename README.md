@@ -1,4 +1,4 @@
-# RE6 ARC Tool - CODE X
+# RE6-GUI-ARC-TOOL-by-CODEX GPT 5.6 Sol&Terra
 
 > A GUI-first ARC workflow specialized for **Resident Evil 6 (PC)**.
 >
