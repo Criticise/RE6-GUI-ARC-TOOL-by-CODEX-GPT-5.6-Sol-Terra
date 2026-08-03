@@ -1,0 +1,416 @@
+
+<h1 align="center">Revil Toolset</h1>
+
+<p align="center">
+    Revil Toolset is a collection of modding tools for RE Engine/MT Framework titles.
+</p>
+
+<p align="center">
+    This toolset runs on Spike foundation.
+</p>
+
+<p align="center">
+    Head to this
+    <b><a href="https://github.com/PredatorCZ/Spike/wiki/Spike">Wiki</a></b>
+    for more information on how to effectively use it.
+</p>
+
+<p align="center">
+<b><a href="https://github.com/PredatorCZ/RevilLib/releases">Latest Release</a></b>
+</p>
+
+## Release authenticity
+
+Every release asset will contain corresponding `.sig` file, together with [Sign Key](sign_key.asc) can be used to verify asset via gpg.
+
+Simple usage:
+
+```bash
+gpg --import sign_key.asc # Required only once
+gpg --verify <asset_name>.sig
+```
+
+<h2>Module list</h2>
+<ul>
+<li><a href="#Binary-to-XML">Binary to XML</a></li>
+<li><a href="#Encrypt-or-Decrypt-DDON-SNGW">Encrypt or Decrypt DDON SNGW</a></li>
+<li><a href="#DLC-Extract">DLC Extract</a></li>
+<li><a href="#ARC-Extract">ARC Extract</a></li>
+<li><a href="#FPK-Extract">FPK Extract</a></li>
+<li><a href="#LMT-to-GLTF">LMT to GLTF</a></li>
+<li><a href="#ARC-Create">ARC Create</a></li>
+<li><a href="#MOD-to-GLTF">MOD to GLTF</a></li>
+<li><a href="#MTF-TEX-to-DDS">MTF TEX to DDS</a></li>
+<li><a href="#OBB-Extract">OBB Extract</a></li>
+<li><a href="#RE-TEX-to-DDS">RE TEX to DDS</a></li>
+<li><a href="#REAsset-to-GLTF">REAsset to GLTF</a></li>
+<li><a href="#SPAC-Extract">SPAC Extract</a></li>
+<li><a href="#UDAS-Extract">UDAS Extract</a></li>
+<li><a href="#ValidateVFS">ValidateVFS</a></li>
+<li><a href="#XFS-to-XML">XFS to XML</a></li>
+<li><a href="#XML-to-Binary">XML to Binary</a></li>
+</ul>
+
+## Binary to XML
+
+### Module command: bin_to_xml
+
+Converts MT Framework various binary formats into XML.
+
+### Supported formats
+
+- rScheduler, sdl
+- rObjSet, osf
+- rHit, hit
+- rObjAdj, oba
+- rSoundRequest, srq
+- rSoundStreamRequest, stq
+- rSoundRandom, srd
+- rCloth, cdf
+- rSoundCurveSet, scs
+- rSoundDirectionalCurveSet, sds
+- XFS format, can have any extension
+
+### Settings
+
+- **title**
+
+  **CLI Long:** ***--title***\
+  **CLI Short:** ***-t***
+
+  Set title for correct archive handling.
+
+- **platform**
+
+  **CLI Long:** ***--platform***\
+  **CLI Short:** ***-p***
+
+  **Default value:** Auto
+
+  **Valid values:** Auto, Win32, PS3, X360, N3DS, CAFE, NSW, PS4, Android, IOS, Win64
+
+  Set platform for correct archive handling.
+
+## Encrypt or Decrypt DDON SNGW
+
+### Module command: ddon_sngw
+
+Encrypts or decrypts `.sngw` sounds/music files from Dragons Dogma Online.
+
+### Input file patterns: `.sngw$`
+
+### Settings
+
+- **encrypt**
+
+  **CLI Long:** ***--encrypt***\
+  **CLI Short:** ***-e***
+
+  **Default value:** false
+
+  Switch between encrypt or decrypt only.
+
+## DLC Extract
+
+### Module command: dlc_extract
+
+Extract DLC .dat archives.
+
+### Input file patterns: `.dat$`
+
+## ARC Extract
+
+### Module command: extract_arc
+
+Extract MT Framework ARC archives.
+
+### Input file patterns: `.arc$`
+
+### Settings
+
+- **title**
+
+  **CLI Long:** ***--title***\
+  **CLI Short:** ***-t***
+
+  Set title for correct archive handling.
+
+- **platform**
+
+  **CLI Long:** ***--platform***\
+  **CLI Short:** ***-p***
+
+  **Default value:** Auto
+
+  **Valid values:** Auto, Win32, PS3, X360, N3DS, CAFE, NSW, PS4, Android, IOS, Win64
+
+  Set platform for correct archive handling.
+
+- **class-whitelist**
+
+  **CLI Long:** ***--class-whitelist***\
+  Extract only specified (comma separated) classes. Extract all if empty.
+
+## FPK Extract
+
+### Module command: fpk_extract
+
+Extract IOS .fpk archives from MHXR.
+
+### Input file patterns: `.fpk$`
+
+## LMT to GLTF
+
+### Module command: lmt_to_gltf
+
+Converts MT Framework `.lmt` motion list into GLTF format.
+
+> [!NOTE]
+> The following file patterns apply to `batch.json` which is described [HERE](https://github.com/PredatorCZ/Spike/wiki/Spike---Batching)
+
+### Main file patterns: `.glb$`, `.gltf$`
+
+### Secondary file patterns: `.lmt$`, `.bin$`
+
+## ARC Create
+
+### Module command: make_arc
+
+Create MT Framework ARC archives.
+
+### Settings
+
+- **title**
+
+  **CLI Long:** ***--title***\
+  **CLI Short:** ***-t***
+
+  Set title for correct archive handling.
+
+- **platform**
+
+  **CLI Long:** ***--platform***\
+  **CLI Short:** ***-p***
+
+  **Default value:** Auto
+
+  **Valid values:** Auto, Win32, PS3, X360, N3DS, CAFE, NSW, PS4, Android, IOS, Win64
+
+  Set platform for correct archive handling.
+
+## MOD to GLTF
+
+### Module command: mod_to_gltf
+
+Converts MT Framework `.mod` model into GLTF format.
+
+### Input file patterns: `.mod$`, `.dom$`, `.arc$`
+
+### Settings
+
+- **quantize-mesh**
+
+  **CLI Long:** ***--quantize-mesh***\
+  **CLI Short:** ***-q***
+
+  **Default value:** true
+
+  Apply KHR_mesh_quantization.
+
+- **quantize-mesh-fake**
+
+  **CLI Long:** ***--quantize-mesh-fake***\
+  **CLI Short:** ***-Q***
+
+  **Default value:** false
+
+  KHR_mesh_quantization is not marked as required extension.
+
+- **no-lods**
+
+  **CLI Long:** ***--no-lods***\
+  **CLI Short:** ***-l***
+
+  **Default value:** true
+
+  Do not export LOD meshes.
+
+- **merge-meshes**
+
+  **CLI Long:** ***--merge-meshes***\
+  **CLI Short:** ***-m***
+
+  **Default value:** true
+
+  Merge meshes as groups
+
+- **generate-model-info**
+
+  **CLI Long:** ***--generate-model-info***\
+  **CLI Short:** ***-i***
+
+  **Default value:** false
+
+  Generate model info xml alongside gltf.
+
+## MTF TEX to DDS
+
+### Module command: mtf_tex_to_dds
+
+Converts MT Framework `.tex` texture into DDS format.
+
+### Input file patterns: `.tex$`, `.arc$`
+
+### Settings
+
+- **platform**
+
+  **CLI Long:** ***--platform***\
+  **CLI Short:** ***-p***
+
+  **Default value:** Auto
+
+  **Valid values:** Auto, Win32, PS3, X360, N3DS, CAFE, NSW, PS4, Android, IOS, Win64
+
+  Set platform for correct texture handling.
+
+## OBB Extract
+
+### Module command: obb_extract
+
+Extract Android .obb archives for Monster Hunter Stories.
+
+### Input file patterns: `.obb$`
+
+## RE TEX to DDS
+
+### Module command: re_tex_to_dds
+
+Converts RE Engine `.tex` texture into DDS format.
+
+### Input file patterns: `.tex$`
+
+### Settings
+
+- **legacy-dds**
+
+  **CLI Long:** ***--legacy-dds***\
+  **CLI Short:** ***-l***
+
+  **Default value:** true
+
+  Tries to convert texture into legacy (DX9) DDS format.
+
+- **force-legacy-dds**
+
+  **CLI Long:** ***--force-legacy-dds***\
+  **CLI Short:** ***-f***
+
+  **Default value:** false
+
+  Will try to convert some matching formats from DX10 to DX9, for example: RG88 to AL88.
+
+- **largest-mipmap-only**
+
+  **CLI Long:** ***--largest-mipmap-only***\
+  **CLI Short:** ***-m***
+
+  **Default value:** true
+
+  Will try to extract only highest mipmap.
+
+## REAsset to GLTF
+
+### Module command: reasset_to_gltf
+
+Converts RE Engine various assets into GLTF format.
+Currently only supports animations.
+
+### Input file patterns: `.mot.43$`, `.mot.65$`, `.mot.78$`, `.mot.458$`, `.motlist.60$`, `.motlist.85$`, `.motlist.99$`, `.motlist.486$`
+
+## SPAC Extract
+
+### Module command: spac_conv
+
+Extracts MT Framework `.spc` sound containers.
+
+### Supported formats within SPAC archive
+
+- FWSE, Modified IMA ADPCM, PC
+- MSF, Various formats (16bit PCM, AT3, ...), PS3
+- RIFF WAVE, Various formats (MS IMA ADPCM mostly), PC
+
+### Input file patterns: `.spc$`
+
+## UDAS Extract
+
+### Module command: udas_extract
+
+Extract udas/das archives from RE4.
+
+### Input file patterns: `.udas.lfs$`
+
+## XFS to XML
+
+### Module command: xfs_to_xml
+
+Converts MT Framework generic binary data table format into XML.
+
+### Settings
+
+- **save-rtti**
+
+  **CLI Long:** ***--save-rtti***\
+  **CLI Short:** ***-r***
+
+  **Default value:** true
+
+  Save layout information.
+
+- **save-data**
+
+  **CLI Long:** ***--save-data***\
+  **CLI Short:** ***-d***
+
+  **Default value:** true
+
+  Save data.
+
+## XML to Binary
+
+### Module command: xml_to_bin
+
+Converts XML format back to MT Framework binary format.
+
+### Supported formats
+
+- rScheduler, sdl
+
+### Input file patterns: `.xml$`
+
+### Settings
+
+- **title**
+
+  **CLI Long:** ***--title***\
+  **CLI Short:** ***-t***
+
+  Set title for correct archive handling.
+
+- **platform**
+
+  **CLI Long:** ***--platform***\
+  **CLI Short:** ***-p***
+
+  **Default value:** Auto
+
+  **Valid values:** Auto, Win32, PS3, X360, N3DS, CAFE, NSW, PS4, Android, IOS, Win64
+
+  Set platform for correct archive handling.
+
+## License
+
+This toolset is available under GPL v3 license. (See LICENSE.md)\
+This toolset uses following libraries:
+
+- RevilLib, Copyright (c) 2017-2025 Lukas Cone

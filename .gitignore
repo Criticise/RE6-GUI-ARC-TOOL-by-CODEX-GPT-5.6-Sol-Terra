@@ -1,0 +1,10 @@
+# Runtime state and local diagnostics
+__pycache__/
+__RE6_ARC_SESSION__/
+RE6_ARC_TOOL_*.log
+RE6_ARC_TOOL_CASE_LOG.txt
+RE6_ARC_TOOL_UI_SETTINGS.json
+
+# Test-only source and release assets
+test_directory_format_conversion.py
+*.7z

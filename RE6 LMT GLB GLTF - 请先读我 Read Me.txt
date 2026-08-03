@@ -1,0 +1,91 @@
+RE6 LMT -> GLB / GLTF - 请先读我
+=================================
+
+中文说明
+--------
+
+一、这个功能能做什么
+
+ARC 工具当前提供两个 LMT 动作导出入口：
+
+1. “选中 LMT 转 GLTF/GLB”：处理当前勾选或选中的一个或多个 LMT。
+2. “全部 LMT 转 GLTF/GLB”：处理当前 ARC 工程中的全部 LMT。
+
+这两个入口调用独立的 CODE X Revil 桥接模块，使用 Revil Toolset 把 LMT 动作注入控制模型，最终生成带动作的 GLB。输出用于预览、检查或在外部软件中继续编辑。
+
+二、控制模型模式
+
+手动模式：
+
+- 可选择或拖入一个 MOD、DOM、GLB 或 GLTF 文件作为控制模型。
+- 所选控制模型会用于本次范围内的全部 LMT。
+- MOD/DOM 会由 Revil 自动转换为控制 GLB，然后再注入 LMT；用户不需要先学会 3ds Max，也不需要自己把 MOD 转成 GLB/GLTF。
+- 已有 GLB/GLTF 会直接作为控制模型使用。
+
+自动模式：
+
+- ARC 工具会扫描当前 ARC 中的 MOD/DOM，并尝试给每个 LMT 单独配对。
+- 如果 LMT 路径或文件名中能识别出 RE6 asset id（例如 em4100），候选模型必须具有完全相同的 asset id；缺少同 id 模型会直接判定失败。
+- 同 id 候选会继续比较 LMT 与模型的骨骼覆盖率。当前最低可靠阈值为 75%。缺失骨骼会降低覆盖率，并在失败原因或配对报告中体现。
+- 如果 LMT 路径本身无法提取 asset id，当前版本才会在 ARC 内全部 MOD/DOM 中按骨骼覆盖率和路径评分寻找候选。
+- 低于可靠阈值、最高候选存在歧义，或任何 LMT 无法可靠配对时，整次操作都会中止并报告；不会静默跳过失败的 LMT。
+
+三、重要限制
+
+- 这是只读动作导出功能，不是 LMT 回写器。
+- 生成的 GLB 可供预览、检查或外部编辑，但修改后的 GLB/GLTF 不能通过当前 ARC 工具重建为 LMT。
+- .lmt.gltf.job.json、.lmt.gltf.report.txt 和 LMT inspection JSON 都是任务记录或只读中间产物，不能回写成 LMT，也不能替代 ARC 中真正的 .lmt 文件。
+- 当前 ARC 打包链仍只接受真实 LMT 原文件。
+- LMT JSON V2 仍是隔离实验项目。只有达到“受支持的 JSON 修改能够可靠重建 LMT”并通过完整验证后，才可能进入主工具；当前发布主链不包含该实验。
+
+四、Revil 依赖与网络
+
+- 第一次使用该功能时，如 third_party/RevilToolset 缺失，独立桥接模块会自动下载并安装官方 Revil Toolset。
+- 下载失败会明确报错。请检查网络后重新执行 LMT 导出操作；下载过程本身最多自动尝试三次。
+- 中国大陆网络环境可能需要代理或 VPN 才能访问 GitHub 下载地址。
+- 下载和解压使用的临时目录在成功或失败后都会清理，不保留下载缓存；安装完成的 Revil Toolset 会保存在 ARC 工具的相对依赖目录中。
+
+
+English Guide
+-------------
+
+1. What This Feature Does
+
+The ARC tool currently provides two LMT motion-export actions:
+
+1. "Selected LMT -> GLTF/GLB" processes one or more checked or selected LMT entries.
+2. "All LMT -> GLTF/GLB" processes every LMT in the current ARC project.
+
+Both actions call the separate CODE X Revil bridge. Revil Toolset injects the LMT motion into a control model and produces an animated GLB for preview, inspection, or further editing in external software.
+
+2. Control Model Modes
+
+Manual mode:
+
+- Choose or drop one MOD, DOM, GLB, or GLTF file as the control model.
+- The same control model is used for every LMT in the current export scope.
+- Revil automatically converts MOD/DOM to a control GLB before injecting the LMT. You do not need to learn 3ds Max or manually convert the MOD to GLB/GLTF first.
+- An existing GLB/GLTF is used directly as the control model.
+
+Automatic mode:
+
+- The ARC tool scans MOD/DOM models in the current ARC and pairs each LMT separately.
+- When a RE6 asset id can be extracted from the LMT path or filename (for example, em4100), only models with the exact same asset id are eligible. A missing same-id model is a hard failure.
+- Same-id candidates are then compared by LMT-to-model bone coverage. The current minimum reliable coverage is 75%. Missing bones reduce this score and are reflected in the failure reason or pairing report.
+- Only when the LMT path contains no recognizable asset id does the current version fall back to evaluating all MOD/DOM models by bone coverage and path score.
+- Low coverage, an ambiguous best candidate, or any unresolved LMT stops the entire operation and is reported. Failed LMT files are never silently skipped.
+
+3. Important Limits
+
+- This is a read-only motion export, not an LMT writeback codec.
+- The generated GLB may be previewed, inspected, or edited externally, but an edited GLB/GLTF cannot currently be rebuilt into LMT by the ARC tool.
+- .lmt.gltf.job.json, .lmt.gltf.report.txt, and LMT inspection JSON files are job records or read-only intermediates. They cannot be written back to LMT and cannot replace the real .lmt entry in an ARC.
+- The current ARC packing path still requires the real original-format LMT file.
+- LMT JSON V2 remains an isolated experiment. It may enter the main tool only after supported JSON edits can reliably rebuild LMT and the complete path is validated. It is not part of the current release pipeline.
+
+4. Revil Dependency and Network Access
+
+- On first use, if third_party/RevilToolset is missing, the separate bridge automatically downloads and installs the official Revil Toolset.
+- A failed download is reported. Check the network and run the LMT export action again; the downloader itself makes up to three attempts.
+- Users in mainland China may need a proxy or VPN to reach the GitHub download.
+- Temporary download and extraction data is removed after success or failure. No download cache is retained. The installed Revil Toolset remains in the ARC tool's relative dependency directory.
