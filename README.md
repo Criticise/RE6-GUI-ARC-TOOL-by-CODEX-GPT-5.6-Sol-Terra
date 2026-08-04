@@ -4,6 +4,8 @@
 >
 > 一个为 **生化危机 6 PC 版** 专门优化的 ARC 图形化工作流工具。
 
+[English](#english) | [中文](#中文)
+
 ## English
 
 RE6 ARC Tool - CODE X is a Windows GUI tool for inspecting, extracting,
