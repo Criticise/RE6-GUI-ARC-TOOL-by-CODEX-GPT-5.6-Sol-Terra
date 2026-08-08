@@ -227,6 +227,8 @@ STANDALONE_EXPORT_MANIFEST_FILE_NAME = BATCH_MANIFEST_FILE_NAME
 FOLDER_EXPORT_MANIFEST_FORMAT = "codex_re6_arc_folder_export"
 FOLDER_EXPORT_MANIFEST_VERSION = 1
 LEGACY_ARC_TEXT_SUFFIX = ".arc.txt"
+TXT_EXPORT_REFERENCE_STATUS_EN = "TXT loaded; no source ARC selection required."
+TXT_EXPORT_REFERENCE_STATUS_ZH = "TXT 已载入，无需选择源 ARC"
 BATCH_SOURCE_DIR_NAME = "ARC解包源文件"
 BATCH_PARSED_DIR_NAME = "ARC解析文件"
 BATCH_LAYOUT_SIBLING_ARC_FOLDERS = "sibling_arc_folders"
@@ -9982,6 +9984,102 @@ def load_bundle_info(bundle_root: Path) -> dict[str, Any]:
         runtime_log(f"Ignoring non-object bundle info: {path}")
         return {}
     return payload
+
+
+def project_uses_txt_export_reference(
+    project_root: Path,
+    manifest: dict[str, Any],
+    bundle_info: dict[str, Any] | None = None,
+) -> bool:
+    """Return whether a loaded project still has a usable ARC export TXT.
+
+    ``bundle_info`` records the TXT path when a folder is opened through the
+    TXT loader.  The recorded path can be absolute and may be stale after a
+    folder is copied, so also check a same-name TXT beside the project and the
+    recorded export root.  A plain ARC project has no TXT load mode and is
+    never classified as TXT-backed by this fallback scan.
+    """
+    info = dict(bundle_info) if bundle_info is not None else load_bundle_info(project_root)
+    mode = str(
+        info.get("folder_load_mode") or manifest.get("folder_load_mode") or ""
+    ).strip().casefold()
+    if mode not in {"txt", "legacy_arc_txt"}:
+        return False
+
+    raw_candidates: list[str] = [
+        str(info.get("folder_manifest_path") or "").strip(),
+        str(info.get("legacy_arc_txt_manifest_path") or "").strip(),
+    ]
+    candidate_paths: list[Path] = []
+    for raw_text in raw_candidates:
+        if not raw_text:
+            continue
+        raw_path = Path(raw_text)
+        candidate_paths.append(
+            raw_path if raw_path.is_absolute() else project_root / raw_path
+        )
+        # A copied project may retain the old absolute path in bundle_info.
+        candidate_paths.append(project_root / raw_path.name)
+        candidate_paths.append(project_root.parent / raw_path.name)
+
+    for raw_root in (
+        str(info.get("folder_export_root") or "").strip(),
+        str(project_root),
+    ):
+        if not raw_root:
+            continue
+        root = Path(raw_root)
+        if not root.is_dir():
+            continue
+        try:
+            candidate_paths.extend(
+                item
+                for item in root.iterdir()
+                if item.is_file() and item.suffix.casefold() == ".txt"
+            )
+        except OSError:
+            continue
+
+    seen: set[str] = set()
+    for candidate in candidate_paths:
+        key = os.path.normcase(str(candidate.resolve(strict=False)))
+        if key in seen:
+            continue
+        seen.add(key)
+        if is_arc_txt_anchor_file(candidate):
+            return True
+    return False
+
+
+def txt_export_display_paths(manifest: dict[str, Any]) -> list[str]:
+    """Return the current project's unique ARC paths for TXT-backed export."""
+    paths: list[str] = []
+    seen: set[str] = set()
+    for entry in manifest.get("entries", []):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            path = normalize_display_path(entry_display_path(entry))
+        except Exception:
+            continue
+        key = path.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(path)
+    return paths
+
+
+def txt_export_reference_order_for_manifest(manifest: dict[str, Any]) -> list[str]:
+    """Use TXT-recorded order, falling back to current manifest order."""
+    raw_order = manifest.get("reference_display_order")
+    if isinstance(raw_order, (list, tuple)):
+        normalized = normalize_reference_display_order(
+            [str(path) for path in raw_order if str(path).strip()]
+        )
+        if normalized:
+            return normalized
+    return normalize_reference_display_order(txt_export_display_paths(manifest))
 
 
 def save_bundle_info(bundle_root: Path, info: dict[str, Any]) -> dict[str, Any]:
@@ -26043,6 +26141,60 @@ class Re6ArcGuiApp:
                     }
                 )
                 return result
+            if project_uses_txt_export_reference(
+                project_root,
+                synced_manifest,
+                load_bundle_info(project_root),
+            ):
+                txt_paths = txt_export_display_paths(synced_manifest)
+                if not txt_paths:
+                    raise Re6ArcError(
+                        self.tr(
+                            "The loaded TXT contains no current ARC entries to export.",
+                            "已加载的 TXT 中没有可导出的当前 ARC 条目。",
+                        )
+                    )
+                txt_order = txt_export_reference_order_for_manifest(synced_manifest)
+                txt_order_keys = {path.casefold() for path in txt_order}
+                matched_paths = [
+                    path for path in txt_order if path.casefold() in {
+                        item.casefold() for item in txt_paths
+                    }
+                ]
+                missing_paths = [
+                    path for path in txt_order if path.casefold() not in {
+                        item.casefold() for item in txt_paths
+                    }
+                ]
+                extra_paths = [
+                    path for path in txt_paths if path.casefold() not in txt_order_keys
+                ]
+                result = repack_re6_project(
+                    project_root,
+                    output_arc_path,
+                    allowed_display_paths=set(txt_paths),
+                    reference_display_order=txt_order,
+                    progress=None,
+                )
+                self._record_output_arc_for_project(project_root, output_arc_path)
+                result.update(
+                    {
+                        "action": "save_as",
+                        "export_mode": "txt",
+                        "reference_arc_path": "",
+                        "reference_entry_count": len(txt_order),
+                        "project_entry_count": len(txt_paths),
+                        "matched_paths": matched_paths,
+                        "matched_count": len(matched_paths),
+                        "extra_paths": extra_paths,
+                        "extra_count": len(extra_paths),
+                        "missing_paths": missing_paths,
+                        "missing_count": len(missing_paths),
+                        "included_custom_extra_count": 0,
+                        "included_mrl_texture_redirect_count": 0,
+                    }
+                )
+                return result
             reference_compare = compare_manifest_entries_to_reference_arc(
                 synced_manifest,
                 reference_arc_path,
@@ -27210,24 +27362,31 @@ class Re6ArcGuiApp:
         self,
         project_root: Path,
         manifest: dict[str, Any],
-    ) -> tuple[Path, Path] | None:
+    ) -> tuple[Path | None, Path] | None:
         export_arc_name = self._effective_arc_output_name(manifest)
+        txt_export_mode = project_uses_txt_export_reference(project_root, manifest)
         if tk is None or ttk is None or filedialog is None:
-            reference_arc_path = self._default_reference_arc_for_export(project_root, manifest)
-            if reference_arc_path is None:
-                reference_arc_path = self._ask_reference_arc_path_for_export(
-                    project_root=project_root,
-                    manifest=manifest,
-                )
-            if reference_arc_path is None:
-                return None
+            reference_arc_path: Path | None = None
+            if not txt_export_mode:
+                reference_arc_path = self._default_reference_arc_for_export(project_root, manifest)
+                if reference_arc_path is None:
+                    reference_arc_path = self._ask_reference_arc_path_for_export(
+                        project_root=project_root,
+                        manifest=manifest,
+                    )
+                if reference_arc_path is None:
+                    return None
             output_folder = self._ask_output_arc_folder_for_export(
                 self._default_output_arc_folder_for_export(project_root),
             )
             if output_folder is None:
                 return None
             output_arc_path = output_folder / export_arc_name
-            if self._path_compare_key(reference_arc_path) == self._path_compare_key(output_arc_path):
+            if (
+                reference_arc_path is not None
+                and self._path_compare_key(reference_arc_path)
+                == self._path_compare_key(output_arc_path)
+            ):
                 self.show_error(
                     self.tr(
                         "Output ARC cannot overwrite the selected original ARC.",
@@ -27240,7 +27399,11 @@ class Re6ArcGuiApp:
             return reference_arc_path, output_arc_path
 
         project_entry_count = len(manifest.get("entries", []))
-        default_reference = self._default_reference_arc_for_export(project_root, manifest)
+        default_reference = (
+            None
+            if txt_export_mode
+            else self._default_reference_arc_for_export(project_root, manifest)
+        )
         default_output_folder = self._default_output_arc_folder_for_export(project_root)
         result: dict[str, Path | None] = {"reference": None, "output": None}
         dialog = tk.Toplevel(self.root)
@@ -27250,7 +27413,16 @@ class Re6ArcGuiApp:
         dialog.minsize(980, 360)
         self._enable_dialog_workspace_reveal(dialog, show_drop_hint=True)
 
-        reference_var = tk.StringVar(value=str(default_reference) if default_reference is not None else "")
+        reference_var = tk.StringVar(
+            value=(
+                self.tr(
+                    TXT_EXPORT_REFERENCE_STATUS_EN,
+                    TXT_EXPORT_REFERENCE_STATUS_ZH,
+                )
+                if txt_export_mode
+                else str(default_reference) if default_reference is not None else ""
+            )
+        )
         output_folder_var = tk.StringVar(value=str(default_output_folder) if default_output_folder is not None else "")
         output_file_name_label_var = tk.StringVar(
             value=self.tr(
@@ -27272,6 +27444,8 @@ class Re6ArcGuiApp:
             dialog.destroy()
 
         def current_reference_path() -> Path | None:
+            if txt_export_mode:
+                return None
             text = str(reference_var.get()).strip()
             return Path(text) if text else None
 
@@ -27306,14 +27480,23 @@ class Re6ArcGuiApp:
         compare_label = ttk.Label(body, textvariable=compare_var, justify="left", wraplength=920)
         compare_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
-        ttk.Label(body, text=self.tr("Mounted Original ARC (drop here)", "已挂载原始 ARC（可拖入）")).grid(row=2, column=0, sticky="w", pady=(16, 0))
+        ttk.Label(
+            body,
+            text=(
+                self.tr("TXT Export Reference", "TXT 导出参照")
+                if txt_export_mode
+                else self.tr("Mounted Original ARC (drop here)", "已挂载原始 ARC（可拖入）")
+            ),
+        ).grid(row=2, column=0, sticky="w", pady=(16, 0))
         reference_entry = ttk.Entry(body, textvariable=reference_var, state="readonly")
         reference_entry.grid(row=2, column=1, sticky="ew", padx=(10, 8), pady=(16, 0))
-        ttk.Button(
+        reference_button = ttk.Button(
             body,
             text=self.tr("Mount / Change...", "挂载 / 更换..."),
             command=lambda: _choose_reference_path(),
-        ).grid(row=2, column=2, sticky="e", pady=(16, 0))
+            state="disabled" if txt_export_mode else "normal",
+        )
+        reference_button.grid(row=2, column=2, sticky="e", pady=(16, 0))
 
         ttk.Label(
             body,
@@ -27363,7 +27546,14 @@ class Re6ArcGuiApp:
                     f"最终导出 ARC：{output_arc_path}" if output_arc_path is not None else "最终导出 ARC：<未设置>",
                 )
             )
-            if reference_arc_path is not None and reference_arc_path.exists() and reference_arc_path.is_file():
+            if txt_export_mode:
+                compare_var.set(
+                    self.tr(
+                        f"{TXT_EXPORT_REFERENCE_STATUS_EN} Current project files: {project_entry_count}.",
+                        f"{TXT_EXPORT_REFERENCE_STATUS_ZH}。当前工程文件数：{project_entry_count}。",
+                    )
+                )
+            elif reference_arc_path is not None and reference_arc_path.exists() and reference_arc_path.is_file():
                 try:
                     reference_entry_count = int(parse_re6_arc(reference_arc_path).num_files)
                 except Exception as exc:
@@ -27399,12 +27589,15 @@ class Re6ArcGuiApp:
             valid = False
             overwrite_required = False
             message = ""
-            if reference_arc_path is None:
+            if not txt_export_mode and reference_arc_path is None:
                 message = self.tr(
                     "Mount the original ARC first.",
                     "请先挂载原始 ARC。",
                 )
-            elif not reference_arc_path.exists() or not reference_arc_path.is_file():
+            elif (
+                not txt_export_mode
+                and (not reference_arc_path.exists() or not reference_arc_path.is_file())
+            ):
                 message = self.tr(
                     "The mounted original ARC path is not valid. Mount it again.",
                     "已挂载原始 ARC 路径无效，请重新挂载。",
@@ -27413,11 +27606,6 @@ class Re6ArcGuiApp:
                 message = self.tr(
                     "Choose which folder should receive the exported ARC.",
                     "请选择导出 ARC 要放到哪个文件夹。",
-                )
-            elif output_folder is None:
-                message = self.tr(
-                    "Output ARC target is not ready yet.",
-                    "导出 ARC 目标当前还没准备好。",
                 )
             elif not output_folder.exists() or not output_folder.is_dir():
                 message = self.tr(
@@ -27464,6 +27652,8 @@ class Re6ArcGuiApp:
             export_button.configure(state="normal" if valid else "disabled")
 
         def _choose_reference_path() -> None:
+            if txt_export_mode:
+                return
             selected_path = self._ask_reference_arc_path_for_export(
                 parent=dialog,
                 project_root=project_root,
@@ -27490,6 +27680,8 @@ class Re6ArcGuiApp:
             _refresh_route_state()
 
         def _drop_reference_arc(paths: list[Path]) -> None:
+            if txt_export_mode:
+                return
             selected_path = next(
                 (path for path in paths if path.is_file() and path.suffix.lower() == ".arc"),
                 None,
@@ -27504,13 +27696,19 @@ class Re6ArcGuiApp:
             reference_var.set(str(self.current_reference_arc_path))
             _refresh_route_state()
 
-        self._register_dialog_drop_target(dialog, reference_entry, _drop_reference_arc, default=True)
+        if not txt_export_mode:
+            self._register_dialog_drop_target(
+                dialog,
+                reference_entry,
+                _drop_reference_arc,
+                default=True,
+            )
 
         def _confirm_export() -> None:
             _refresh_route_state()
             reference_arc_path = current_reference_path()
             output_arc_path = current_output_path()
-            if reference_arc_path is None or output_arc_path is None:
+            if output_arc_path is None or (not txt_export_mode and reference_arc_path is None):
                 return
             if export_button.cget("state") == "disabled":
                 return
@@ -27541,7 +27739,7 @@ class Re6ArcGuiApp:
         output_entry.focus_set()
         _refresh_route_state()
         dialog.wait_window()
-        if result["reference"] is None or result["output"] is None:
+        if result["output"] is None:
             return None
         return result["reference"], result["output"]
 
