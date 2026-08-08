@@ -20,6 +20,7 @@ import sys
 import threading
 import tempfile
 import traceback
+import urllib.request
 import webbrowser
 import zipfile
 import zlib
@@ -30,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
 try:
     import winreg
@@ -245,14 +246,8 @@ BATCH_PARSED_WRITEBACK_PROOF_VERSION = 1
 RE6_WRITEBACK_TEMPLATE_FORMAT = "codex_re6_writeback_template"
 RE6_WRITEBACK_TEMPLATE_VERSION = 1
 RE6_WRITEBACK_TEMPLATE_SIDECAR_SUFFIXES = {
-    "tex": ".re6-conversion-ref-do-not-delete.json",
-    "xfs": ".re6-conversion-ref-do-not-delete.json",
-}
-# Existing exports used format-specific names. Keep those readable so an
-# already-exported DDS/XML folder remains repackable after this rename.
-RE6_LEGACY_WRITEBACK_TEMPLATE_SIDECAR_SUFFIXES = {
-    "tex": (".re6tex.json",),
-    "xfs": (".re6xfs.json",),
+    "tex": ".re6tex.json",
+    "xfs": ".re6xfs.json",
 }
 BATCH_WRITABLE_PARSED_KINDS = frozenset({"tex_dds", "xfs_xml"})
 BATCH_REPACK_POLICY_VERIFIED_PARSED = "verified_parsed_preferred"
@@ -284,6 +279,91 @@ MTF_SOUND_TOOL_GITHUB_URL = "https://github.com/LuBuCake/MTF.SoundTool"
 MTF_SOUND_TOOL_FORUM_URL = "https://residentevilmodding.boards.net/thread/15557/mt-framework-sound-tool"
 REVILIB_GITHUB_URL = "https://github.com/RelivoF/ReviLib"
 REVILIB_ARCHIVE_URL = "https://web.archive.org/web/*/https://github.com/RelivoF/ReviLib"
+GITHUB_REPOSITORY = "Criticise/RE6-GUI-ARC-TOOL-by-CODEX-GPT-5.6-Sol-Terra"
+GITHUB_SOURCE_API_URL = (
+    f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/"
+    "codex_re6_arc_gui.py?ref=main"
+)
+GITHUB_SOURCE_FILE_NAME = "codex_re6_arc_gui.py"
+GITHUB_RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
+GITHUB_RELEASE_URL = (
+    "https://github.com/Criticise/RE6-GUI-ARC-TOOL-by-CODEX-GPT-5.6-Sol-Terra/"
+    "releases/tag/initial-release"
+)
+GITHUB_RELEASE_BASELINE_TAG = "initial-release"
+GITHUB_UPDATE_TIMEOUT_SECONDS = 8.0
+
+
+def github_source_blob_sha(path: Path) -> str:
+    """Return the Git blob SHA used by GitHub's contents API for one file."""
+    data = Path(path).read_bytes().replace(b"\r\n", b"\n")
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
+
+
+def evaluate_github_update(
+    source_sha: Any,
+    release_tag: Any,
+    *,
+    local_source_sha: Any,
+) -> dict[str, bool]:
+    """Compare GitHub's current source and release against this local build."""
+    current_source_sha = str(source_sha or "").strip().lower()
+    current_local_source_sha = str(local_source_sha or "").strip().lower()
+    current_release_tag = str(release_tag or "").strip()
+    source_updated = bool(
+        current_source_sha
+        and current_local_source_sha
+        and current_source_sha != current_local_source_sha
+    )
+    release_updated = bool(
+        current_release_tag and current_release_tag != GITHUB_RELEASE_BASELINE_TAG
+    )
+    return {
+        "source_updated": source_updated,
+        "release_updated": release_updated,
+        "updated": source_updated or release_updated,
+    }
+
+
+def fetch_github_update_info(
+    *,
+    opener: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Read the current source SHA and latest Release metadata from GitHub."""
+    request_opener = opener or urllib.request.urlopen
+
+    def read_json(url: str) -> dict[str, Any]:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "RE6-ARC-Tool",
+            },
+        )
+        with request_opener(request, timeout=GITHUB_UPDATE_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"GitHub returned an invalid JSON object for {url}.")
+        return payload
+
+    source_payload = read_json(GITHUB_SOURCE_API_URL)
+    release_payload = read_json(GITHUB_RELEASE_API_URL)
+    local_source_sha = github_source_blob_sha(SCRIPT_DIR / GITHUB_SOURCE_FILE_NAME)
+    result = evaluate_github_update(
+        source_payload.get("sha"),
+        release_payload.get("tag_name"),
+        local_source_sha=local_source_sha,
+    )
+    result.update(
+        {
+            "source_sha": str(source_payload.get("sha") or "").strip(),
+            "local_source_sha": local_source_sha,
+            "release_tag": str(release_payload.get("tag_name") or "").strip(),
+            "release_url": str(release_payload.get("html_url") or GITHUB_RELEASE_URL),
+        }
+    )
+    return result
 
 
 def is_arc_txt_anchor_file(path: Path) -> bool:
@@ -964,12 +1044,14 @@ def standalone_export_folder_for_manifest(
     root_name = str(payload.get("root_folder_name") or "").strip()
     recorded_root = str(payload.get("export_root") or "").strip()
     candidates: list[Path] = []
-    if recorded_root:
-        candidates.append(Path(recorded_root))
     if root_name:
         candidates.append(manifest_path.parent / root_name)
     if root_name and manifest_path.parent.name.casefold() == root_name.casefold():
         candidates.append(manifest_path.parent)
+    # A copied TXT must resolve its sibling export folder before considering
+    # the absolute path recorded on the exporting PC.
+    if recorded_root:
+        candidates.append(Path(recorded_root))
     seen: set[str] = set()
     for candidate in candidates:
         key = os.path.normcase(str(candidate.resolve(strict=False)))
@@ -998,43 +1080,103 @@ def standalone_export_output_arc_name(
     return output_name
 
 
-def _standalone_parsed_source_arc(payload: dict[str, Any]) -> Path:
-    source_arc_record = payload.get("source_arc")
-    if not isinstance(source_arc_record, dict):
-        raise Re6ArcError(
-            "This parsed-export TXT does not record its original ARC; it cannot rebuild parsed resources safely."
-        )
-    source_arc = Path(str(source_arc_record.get("path") or "").strip())
-    if not source_arc.is_file():
-        raise Re6ArcError(f"The original ARC recorded by the parsed-export TXT is missing: {source_arc}")
-    expected_size = int(source_arc_record.get("size", 0) or 0)
-    if expected_size and int(source_arc.stat().st_size) != expected_size:
-        raise Re6ArcError(
-            f"The original ARC size no longer matches the parsed-export TXT: {source_arc}"
-        )
-    expected_sha1 = str(source_arc_record.get("sha1") or "").strip().lower()
-    if expected_sha1 and sha1_file(source_arc).lower() != expected_sha1:
-        raise Re6ArcError(
-            f"The original ARC SHA-1 no longer matches the parsed-export TXT: {source_arc}"
-        )
-    return source_arc
+def _standalone_unique_existing_directories(candidates: list[Path]) -> list[Path]:
+    directories: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            path = Path(candidate)
+            key = os.path.normcase(str(path.resolve(strict=False)))
+        except (OSError, ValueError):
+            continue
+        if key in seen or not path.is_dir():
+            continue
+        seen.add(key)
+        directories.append(path)
+    return directories
 
 
-def _standalone_parsed_source_project(
+def _standalone_parsed_local_roots(
     payload: dict[str, Any],
+    *,
+    manifest_path: Path | None = None,
+    export_folder: Path | None = None,
+) -> list[Path]:
+    """Return local package roots for a copied standalone parsed TXT."""
+    candidates: list[Path] = []
+
+    def add_directory_and_parents(path: Path | None) -> None:
+        if path is None:
+            return
+        current = Path(path)
+        for _index in range(3):
+            candidates.append(current)
+            if current.parent == current:
+                break
+            current = current.parent
+
+    add_directory_and_parents(export_folder)
+    if manifest_path is not None:
+        manifest_parent = Path(manifest_path).parent
+        add_directory_and_parents(manifest_parent)
+        root_name = str(payload.get("root_folder_name") or "").strip()
+        root_path = Path(root_name) if root_name else None
+        if (
+            root_path is not None
+            and not root_path.is_absolute()
+            and len(root_path.parts) == 1
+            and root_path.name not in {"", ".", ".."}
+        ):
+            candidates.append(manifest_parent / root_path)
+
+    # The recorded export root remains useful on the original computer, but it
+    # is deliberately last so copied packages never prefer a stale old path.
+    recorded_root = str(payload.get("export_root") or "").strip()
+    if recorded_root:
+        candidates.append(Path(recorded_root))
+    return _standalone_unique_existing_directories(candidates)
+
+
+def _standalone_source_project_candidates(
+    payload: dict[str, Any],
+    *,
+    manifest_path: Path | None = None,
+    export_folder: Path | None = None,
+) -> list[Path]:
+    source_project_text = str(payload.get("source_project") or "").strip()
+    recorded_path = Path(source_project_text) if source_project_text else None
+    project_names = ["source_project", "project"]
+    if recorded_path is not None and recorded_path.name:
+        project_names.insert(0, recorded_path.name)
+
+    candidates: list[Path] = []
+    for root in _standalone_parsed_local_roots(
+        payload,
+        manifest_path=manifest_path,
+        export_folder=export_folder,
+    ):
+        for project_name in project_names:
+            candidates.append(root / project_name)
+        candidates.append(root)
+        if (
+            recorded_path is not None
+            and not recorded_path.is_absolute()
+            and not any(part == ".." for part in recorded_path.parts)
+        ):
+            candidates.append(root / recorded_path)
+    if recorded_path is not None:
+        candidates.append(recorded_path)
+    return _standalone_unique_existing_directories(candidates)
+
+
+def _standalone_source_project_status(
+    source_project: Path,
     required_paths: set[str],
 ) -> tuple[Path | None, str]:
-    """Return a complete recorded source project, or a fallback diagnostic."""
-    source_project_text = str(payload.get("source_project") or "").strip()
-    if not source_project_text:
-        return None, "the parsed-export TXT does not record a source project"
-    source_project = Path(source_project_text)
-    if not source_project.is_dir():
-        return None, f"the recorded source project is missing: {source_project}"
     try:
         manifest = load_project_manifest(source_project)
     except Exception as exc:
-        return None, f"the recorded source project is unreadable: {source_project} | {exc}"
+        return None, f"source project is unreadable: {source_project} | {exc}"
     entries = {
         normalize_display_path(entry_display_path(entry)).casefold(): entry
         for entry in manifest.get("entries", [])
@@ -1060,10 +1202,150 @@ def _standalone_parsed_source_project(
             missing.append(required_path)
     if missing:
         return None, (
-            f"the recorded source project is incomplete for {len(missing)} TXT identity/identities: "
+            f"source project is incomplete for {len(missing)} TXT identity/identities: "
             + ", ".join(missing[:8])
         )
     return source_project, ""
+
+
+def _standalone_parsed_source_arc(
+    payload: dict[str, Any],
+    *,
+    manifest_path: Path | None = None,
+    export_folder: Path | None = None,
+) -> Path:
+    source_arc_record = payload.get("source_arc")
+    if not isinstance(source_arc_record, dict):
+        raise Re6ArcError(
+            "This parsed-export TXT does not record its original ARC; it cannot rebuild parsed resources safely."
+        )
+    source_arc_text = str(source_arc_record.get("path") or "").strip()
+    source_arc = Path(source_arc_text) if source_arc_text else None
+    source_arc_name = Path(str(source_arc_record.get("name") or "").strip()).name
+    if not source_arc_name and source_arc is not None:
+        source_arc_name = source_arc.name
+    if not source_arc_name:
+        root_name = str(payload.get("root_folder_name") or "").strip()
+        source_arc_name = f"{Path(root_name).stem}.arc" if root_name else ""
+
+    candidates: list[Path] = []
+    if source_arc_name:
+        for root in _standalone_parsed_local_roots(
+            payload,
+            manifest_path=manifest_path,
+            export_folder=export_folder,
+        ):
+            candidates.extend(
+                (
+                    root / source_arc_name,
+                    root / "source_project" / source_arc_name,
+                    root / "project" / source_arc_name,
+                )
+            )
+    if source_arc is not None:
+        candidates.append(source_arc)
+
+    expected_size = int(source_arc_record.get("size", 0) or 0)
+    expected_sha1 = str(source_arc_record.get("sha1") or "").strip().lower()
+    failures: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            key = os.path.normcase(str(candidate.resolve(strict=False)))
+        except (OSError, ValueError):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        if not candidate.is_file():
+            failures.append(f"missing: {candidate}")
+            continue
+        if expected_size and int(candidate.stat().st_size) != expected_size:
+            failures.append(f"size mismatch: {candidate}")
+            continue
+        if expected_sha1 and sha1_file(candidate).lower() != expected_sha1:
+            failures.append(f"SHA-1 mismatch: {candidate}")
+            continue
+        return candidate
+    recorded_display = str(source_arc) if source_arc is not None else source_arc_name or "<none>"
+    detail = f" ({failures[-1]})" if failures else ""
+    raise Re6ArcError(
+        f"The original ARC recorded by the parsed-export TXT is missing or invalid: {recorded_display}{detail}"
+    )
+
+
+def _standalone_parsed_source_project(
+    payload: dict[str, Any],
+    required_paths: set[str],
+    *,
+    manifest_path: Path | None = None,
+    export_folder: Path | None = None,
+) -> tuple[Path | None, str]:
+    """Return a complete local/recorded source project, or a fallback diagnostic."""
+    source_project_text = str(payload.get("source_project") or "").strip()
+    candidates = _standalone_source_project_candidates(
+        payload,
+        manifest_path=manifest_path,
+        export_folder=export_folder,
+    )
+    failures: list[str] = []
+    for candidate in candidates:
+        source_project, error = _standalone_source_project_status(candidate, required_paths)
+        if source_project is not None:
+            return source_project, ""
+        failures.append(error)
+    if failures:
+        return None, failures[-1]
+    if source_project_text:
+        return None, f"the recorded source project is missing: {source_project_text}"
+    return None, "the parsed-export TXT does not record a source project"
+
+
+def _standalone_local_template_for_arc_identity(
+    payload: dict[str, Any],
+    source_relative: str,
+    sidecar_suffix: str,
+    *,
+    manifest_path: Path | None = None,
+    export_folder: Path | None = None,
+) -> Path | None:
+    """Locate a copied local TEX/XFS template by its exact ARC identity."""
+    normalized_source = normalize_display_path(source_relative)
+    source_parts = PurePosixPath(normalized_source).parts
+    expected_magic = (
+        {FORMAT_MAGIC_TEX, FORMAT_MAGIC_RTEX}
+        if sidecar_suffix.casefold() == ".dds"
+        else {FORMAT_MAGIC_XFS}
+    )
+    roots = _standalone_parsed_local_roots(
+        payload,
+        manifest_path=manifest_path,
+        export_folder=export_folder,
+    )
+    for root in roots:
+        for candidate in (
+            root.joinpath(*source_parts),
+            root / EXTRACTED_FILES_DIR_NAME / Path(*source_parts),
+            root / "source" / Path(*source_parts),
+            root / BATCH_ARC_SOURCE_DIR_NAME / Path(*source_parts),
+        ):
+            if candidate.is_file() and read_file_magic(candidate) in expected_magic:
+                return candidate
+
+    source_project, _source_project_error = _standalone_parsed_source_project(
+        payload,
+        {normalized_source},
+        manifest_path=manifest_path,
+        export_folder=export_folder,
+    )
+    if source_project is None:
+        return None
+    template_path, _template_error = _project_template_for_arc_identity(
+        source_project,
+        normalized_source,
+        sidecar_suffix,
+    )
+    return template_path
 
 
 def _group_standalone_parsed_export_entries(
@@ -1186,6 +1468,7 @@ def _repack_parsed_folder_from_export_txt(
     payload: dict[str, Any],
     output_arc: Path,
     *,
+    manifest_path: Path | None = None,
     include_extra_files: bool = False,
     allow_unsafe_extra_spc: bool = False,
 ) -> dict[str, Any]:
@@ -1196,6 +1479,8 @@ def _repack_parsed_folder_from_export_txt(
     source_project, source_project_error = _standalone_parsed_source_project(
         payload,
         required_source_paths,
+        manifest_path=manifest_path,
+        export_folder=export_folder,
     )
     txt_source_entry_contracts = {
         source_relative: _standalone_source_entry_from_records(
@@ -1208,7 +1493,11 @@ def _repack_parsed_folder_from_export_txt(
     source_arc: Path | None = None
     if source_project is None:
         try:
-            source_arc = _standalone_parsed_source_arc(payload)
+            source_arc = _standalone_parsed_source_arc(
+                payload,
+                manifest_path=manifest_path,
+                export_folder=export_folder,
+            )
         except Exception as exc:
             missing_contracts = [
                 source_relative
@@ -1366,6 +1655,17 @@ def _repack_parsed_folder_from_export_txt(
                 ),
                 None,
             )
+            local_writeback_template = next(
+                (
+                    template
+                    for _record, candidate in recorded_files
+                    if candidate.suffix.casefold() in {".dds", ".xml"}
+                    and (template := load_re6_writeback_template_sidecar(candidate)) is not None
+                ),
+                None,
+            )
+            if local_writeback_template is not None:
+                writeback_template = local_writeback_template
             if writeback_template is None and isinstance(entry.get("writeback_template"), dict):
                 writeback_template = entry["writeback_template"]
 
@@ -1456,9 +1756,20 @@ def _repack_parsed_folder_from_export_txt(
                         if tex_helper is None:
                             raise Re6ArcError("The TEX rebuild module is missing.")
                         ensure_parent(target_path)
+                        template_path = (
+                            target_path
+                            if target_path.is_file()
+                            else _standalone_local_template_for_arc_identity(
+                                payload,
+                                source_relative,
+                                ".dds",
+                                manifest_path=manifest_path,
+                                export_folder=export_folder,
+                            )
+                        )
                         _codec_kind, rebuilt_data = rebuild_and_validate_import_sidecar(
                             dds_path,
-                            target_path if target_path.is_file() else None,
+                            template_path,
                             script_dir,
                             writeback_template=writeback_template,
                             helper_cache={"tex": tex_helper},
@@ -1469,9 +1780,20 @@ def _repack_parsed_folder_from_export_txt(
                         if xfs_helper is None:
                             raise Re6ArcError("The XFS rebuild module is missing.")
                         ensure_parent(target_path)
+                        template_path = (
+                            target_path
+                            if target_path.is_file()
+                            else _standalone_local_template_for_arc_identity(
+                                payload,
+                                source_relative,
+                                ".xml",
+                                manifest_path=manifest_path,
+                                export_folder=export_folder,
+                            )
+                        )
                         _codec_kind, rebuilt_data = rebuild_and_validate_import_sidecar(
                             xml_path,
-                            target_path if target_path.is_file() else None,
+                            template_path,
                             script_dir,
                             writeback_template=writeback_template,
                             helper_cache={"xfs": xfs_helper},
@@ -1920,6 +2242,7 @@ def repack_folder_from_export_txt(
                 export_folder,
                 payload,
                 output_arc,
+                manifest_path=manifest_path,
                 include_extra_files=include_extra_files,
                 allow_unsafe_extra_spc=allow_unsafe_extra_spc,
             )
@@ -2597,12 +2920,24 @@ def materialize_legacy_arc_text_source_files(
         target_path = staging_root.joinpath(*PurePosixPath(display_path).parts)
         ensure_parent(target_path)
         shutil.copy2(source_path, target_path)
+    template_sidecar_count = 0
+    for source_path, display_path in parsed_sidecar_items:
+        template_sidecar = re6_writeback_template_sidecar_path(source_path)
+        if not template_sidecar.is_file():
+            continue
+        target_sidecar = re6_writeback_template_sidecar_path(
+            staging_root.joinpath(*PurePosixPath(display_path).parts)
+        )
+        ensure_parent(target_sidecar)
+        shutil.copy2(template_sidecar, target_sidecar)
+        template_sidecar_count += 1
     total_folder_files = sum(1 for item in source_root.rglob("*") if item.is_file())
     return {
         "legacy_txt_entry_count": len(source_items),
         "legacy_txt_missing_paths": missing_paths,
         "legacy_txt_missing_count": len(missing_paths),
         "legacy_txt_parsed_sidecar_count": len(parsed_sidecar_items),
+        "legacy_txt_template_sidecar_count": template_sidecar_count,
         "legacy_txt_ignored_folder_file_count": max(
             0,
             total_folder_files - len(staged_items),
@@ -2811,11 +3146,6 @@ def compress_re6_pc_payload(data: bytes) -> bytes:
     if not data:
         return compress_zlib_stream(data, level=0)
     level9 = compress_zlib_stream(data, level=9)
-    # A zlib level-0 stream stores the original bytes plus its own framing,
-    # so it cannot beat a level-9 result that is already no larger than the
-    # input. Avoid its second full memory pass for ordinary compressible data.
-    if len(level9) <= len(data):
-        return level9
     level0 = compress_zlib_stream(data, level=0)
     return level9 if len(level9) <= len(level0) else level0
 
@@ -4830,6 +5160,17 @@ def re6_writeback_template_sidecar_path(parsed_path: Path) -> Path:
     )
 
 
+def is_re6_writeback_template_sidecar_path(path: Path) -> bool:
+    """Keep local DDS/XML template metadata out of ARC source scanning."""
+    name = Path(path).name.casefold()
+    return name.endswith(
+        (
+            (".dds" + RE6_WRITEBACK_TEMPLATE_SIDECAR_SUFFIXES["tex"]).casefold(),
+            (".xml" + RE6_WRITEBACK_TEMPLATE_SIDECAR_SUFFIXES["xfs"]).casefold(),
+        )
+    )
+
+
 def write_re6_writeback_template_sidecar(
     parsed_path: Path,
     template: dict[str, Any],
@@ -4843,19 +5184,11 @@ def write_re6_writeback_template_sidecar(
 
 
 def load_re6_writeback_template_sidecar(parsed_path: Path) -> dict[str, Any] | None:
-    """Load the current template sidecar, then a legacy format-specific one."""
+    """Load a local DDS/XML template sidecar when one exists."""
     parsed_path = Path(parsed_path)
     kind = _re6_writeback_template_kind_for_parsed_path(parsed_path)
-    current_sidecar_path = re6_writeback_template_sidecar_path(parsed_path)
-    candidate_paths = [
-        current_sidecar_path,
-        *(
-            parsed_path.with_name(parsed_path.name + suffix)
-            for suffix in RE6_LEGACY_WRITEBACK_TEMPLATE_SIDECAR_SUFFIXES[kind]
-        ),
-    ]
-    sidecar_path = next((path for path in candidate_paths if path.is_file()), None)
-    if sidecar_path is None:
+    sidecar_path = re6_writeback_template_sidecar_path(parsed_path)
+    if not sidecar_path.is_file():
         return None
     try:
         payload = json.loads(sidecar_path.read_text(encoding="utf-8-sig"))
@@ -6240,6 +6573,7 @@ def batch_extract_re6_arcs(
                                     parsed_source_path,
                                     output_root,
                                     "source_only_lmt",
+                                    pack_policy=SUPPLEMENTAL_PACK_POLICY_NEVER,
                                 )
                             )
                             entry_record["parsed_kind"] = "source_only"
@@ -6303,6 +6637,7 @@ def batch_extract_re6_arcs(
                                     parsed_source_path,
                                     output_root,
                                     "source_only",
+                                    pack_policy=SUPPLEMENTAL_PACK_POLICY_NEVER,
                                 )
                             )
                             entry_record["parsed_kind"] = "source_only"
@@ -6404,6 +6739,7 @@ def batch_extract_re6_arcs(
                                 parsed_source_path,
                                 output_root,
                                 "source_only",
+                                pack_policy=SUPPLEMENTAL_PACK_POLICY_NEVER,
                             )
                         ]
                         parsed_file_count += 1
@@ -6455,8 +6791,8 @@ def batch_extract_re6_arcs(
         "created_utc": utc_now_text(),
         "warning_zh": "请勿删除或单独移动此 TXT。它必须和所有编号 ARC 文件夹放在同一目录。",
         "warning_en": "Do not delete or move this TXT by itself. Keep it beside every numbered ARC folder.",
-        "parsed_coverage_zh": "解析目录必须为每个 ARC 条目保留一项：可解析格式使用真实解析结果；不可解析格式使用可直接回包的同名原格式文件，不创建假解析文件夹。若解析条目数少于源文件条目数，表示解包/解析不完整，应先停止回包并检查。",
-        "parsed_coverage_en": "The parsed tree must retain one record for every ARC entry: decoded formats use their real parsed output; unsupported formats use a directly repackable same-name original-format file without a fake wrapper folder. If parsed entry coverage is lower than source entry coverage, extraction is incomplete and repacking should be stopped for inspection.",
+        "parsed_coverage_zh": "解析目录必须为每个 ARC 条目保留一项：可解析格式使用真实解析结果；不可解析格式使用同名原格式文件，不创建假解析文件夹。若解析条目数少于源文件条目数，表示解包/解析不完整，应先停止回包并检查。",
+        "parsed_coverage_en": "The parsed tree must retain one record for every ARC entry: decoded formats use their real parsed output; unsupported formats use the same-name original-format file without a fake wrapper folder. If parsed entry coverage is lower than source entry coverage, extraction is incomplete and repacking should be stopped for inspection.",
         "parsed_writeback_policy_zh": "解析目录文件是 TXT 回包的权威输入；回写证明仅用于诊断。已验证例外：当前 MRL 及其引用的全部 DDS/TEX 可增删、移动路径并改变 ARC 索引，原 TEX 仅作可选模板。其他解析文件缺失或无法转换时仍省略对应条目，不补回原版。",
         "parsed_writeback_policy_en": "Parsed files are authoritative for TXT repack; writeback proof is diagnostic only. Verified exception: current MRL files and every DDS/TEX reference they contain may be added/deleted, moved, and assigned new ARC indices; old TEX data is only an optional template. Other missing or failed parsed entries remain omitted without original fallback.",
         "parsed_writeback_proof_version": BATCH_PARSED_WRITEBACK_PROOF_VERSION,
@@ -7554,6 +7890,15 @@ def inspect_custom_batch_repack(
                 continue
             relative_path = path.relative_to(source_folder)
             relative_text = relative_path.as_posix()
+            if is_re6_writeback_template_sidecar_path(path):
+                ignored_files.append(
+                    {
+                        "kind": "writeback_template_sidecar",
+                        "path": str(path),
+                        "reason": "Local DDS/XML writeback metadata is consumed as a template, not packed as an ARC file.",
+                    }
+                )
+                continue
             lowered_name = path.name.lower()
             lowered_parts = {part.lower() for part in relative_path.parts[:-1]}
             junk_reason = ""
@@ -7814,6 +8159,8 @@ def custom_batch_repack_re6_folders(
                 for path in source_files:
                     if _path_is_inside_any(path, spc_bundle_roots):
                         continue
+                    if is_re6_writeback_template_sidecar_path(path):
+                        continue
                     relative_path = path.relative_to(source_folder)
                     lowered_name = path.name.lower()
                     lowered_parts = {part.lower() for part in relative_path.parts[:-1]}
@@ -7861,8 +8208,9 @@ def custom_batch_repack_re6_folders(
                         template_path: Path | None = (
                             adjacent_template if adjacent_template.is_file() else None
                         )
+                        writeback_template = load_re6_writeback_template_sidecar(dds_path)
                         mrl_plan = mrl_texture_plans.get(target_tex_path.casefold())
-                        if template_path is None and mrl_plan is not None:
+                        if writeback_template is None and template_path is None and mrl_plan is not None:
                             template_data = bytes(mrl_plan.get("template_data") or b"")
                             if template_data:
                                 template_path = (
@@ -7874,9 +8222,10 @@ def custom_batch_repack_re6_folders(
                                 template_path.write_bytes(template_data)
                         output_tex_path.write_bytes(
                             rebuild_and_validate_re6_tex_from_dds_optional_template(
-                                template_path,
+                                None if writeback_template is not None else template_path,
                                 dds_path,
                                 tex_helper,
+                                template=writeback_template,
                             )
                         )
                         if mrl_plan is not None:
@@ -7895,11 +8244,15 @@ def custom_batch_repack_re6_folders(
                         source_xfs_path = _custom_batch_xml_target_path(xml_path)
                         output_xfs_path = stage_root / source_xfs_path.relative_to(source_folder)
                         ensure_parent(output_xfs_path)
+                        writeback_template = load_re6_writeback_template_sidecar(xml_path)
                         output_xfs_path.write_bytes(
                             rebuild_re6_xfs_from_xml(
-                                source_xfs_path if source_xfs_path.is_file() else None,
+                                None if writeback_template is not None else (
+                                    source_xfs_path if source_xfs_path.is_file() else None
+                                ),
                                 xml_path,
                                 xfs_helper,
+                                template=writeback_template,
                             )
                         )
                         converted_working_file_count += 1
@@ -8251,7 +8604,12 @@ def batch_repack_re6_arcs(
             "batch parsed directory",
         )
         if not source_root.exists():
-            raise Re6ArcError(f"Batch source directory is missing: {source_root}")
+            # Parsed TXT records carry writeback templates for TEX/XFS. A
+            # copied TXT + parsed tree can therefore repack those entries even
+            # after the old source tree was left on another computer.
+            runtime_log(
+                f"Batch source directory is unavailable; using local parsed TXT inputs only: {source_root}"
+            )
     output_root.mkdir(parents=True, exist_ok=True)
     collisions = collect_batch_output_collisions(manifest, output_root)
     if collisions and not overwrite_existing:
@@ -8598,10 +8956,10 @@ def batch_repack_re6_arcs(
                                 effective_source_path = None
                                 missing_reason = "SPC rebuild helper and source SPC are both missing"
                     elif parsed_kind in {MTF_REFERENCE_PARSED_KIND, "source_only"}:
-                        # The parsed tree keeps a same-format raw mirror for
-                        # every source-only entry. It is a valid fallback when
-                        # the source tree has been removed, while auxiliary
-                        # artifacts remain marked never_pack.
+                        # Only a parsed output explicitly marked as packable
+                        # can replace its same-format source. LMT and other
+                        # read-only mirrors carry never_pack and must not
+                        # resurrect a source file that the user deleted.
                         packable_parsed_path: Path | None = None
                         for parsed_output in parsed_outputs:
                             if not isinstance(parsed_output, dict):
@@ -9882,13 +10240,17 @@ def _folder_export_contexts_for_import(
         export_roots: list[Path] = []
         root_name = str(payload.get("root_folder_name") or "").strip()
         recorded_root = str(payload.get("export_root") or "").strip()
-        if recorded_root:
-            export_roots.append(Path(recorded_root))
         if root_name:
             export_roots.append(manifest_path.parent / root_name)
+            if manifest_path.parent.name.casefold() == root_name.casefold():
+                export_roots.append(manifest_path.parent)
             if lookup_root.name.casefold() == root_name.casefold():
                 export_roots.append(lookup_root)
             export_roots.append(lookup_root / root_name)
+        # Resolve copied sibling folders before the absolute export root stored
+        # by another PC.
+        if recorded_root:
+            export_roots.append(Path(recorded_root))
 
         unique_roots: list[Path] = []
         root_keys: set[str] = set()
@@ -10119,17 +10481,31 @@ def _standalone_context_reference_bytes(context: dict[str, Any]) -> dict[str, by
     payload = context.get("payload", {})
     if not isinstance(payload, dict):
         return {}
+    manifest_path = Path(context["manifest_path"]) if context.get("manifest_path") else None
+    export_roots = context.get("export_roots", [])
+    export_folder = Path(export_roots[0]) if export_roots else None
     try:
-        source_arc = _standalone_parsed_source_arc(payload)
+        source_project, _source_project_error = _standalone_parsed_source_project(
+            payload,
+            set(),
+            manifest_path=manifest_path,
+            export_folder=export_folder,
+        )
+        if source_project is not None:
+            project_bytes = _project_entry_bytes_by_display_path(source_project)
+            if project_bytes:
+                return project_bytes
+    except Exception:
+        pass
+    try:
+        source_arc = _standalone_parsed_source_arc(
+            payload,
+            manifest_path=manifest_path,
+            export_folder=export_folder,
+        )
         return _read_arc_entry_bytes_by_display_path(source_arc)
     except Exception:
         pass
-    source_project_text = str(payload.get("source_project") or "").strip()
-    if source_project_text:
-        try:
-            return _project_entry_bytes_by_display_path(Path(source_project_text))
-        except Exception:
-            pass
     return {}
 
 
@@ -10315,6 +10691,12 @@ def prepare_codec_items_for_new_project(
         redirect = (mrl_texture_redirects or {}).get(target_relative.casefold())
         if matched is None and redirect is not None:
             source_relative = normalize_rel_posix(str(redirect.get("old_path") or "")).strip("/")
+        embedded_template = (
+            record.get("writeback_template")
+            if isinstance(record, dict)
+            else None
+        )
+        local_template = load_re6_writeback_template_sidecar(sidecar_path)
         sidecar_plans.append(
             {
                 "sidecar_path": sidecar_path,
@@ -10322,11 +10704,7 @@ def prepare_codec_items_for_new_project(
                 "adjacent_template": adjacent_template,
                 "target_relative": target_relative,
                 "context": context,
-                "writeback_template": (
-                    record.get("writeback_template")
-                    if isinstance(record, dict)
-                    else None
-                ),
+                "writeback_template": local_template or embedded_template,
                 "source_relative": source_relative,
                 "redirect": redirect,
             }
@@ -10371,27 +10749,52 @@ def prepare_codec_items_for_new_project(
                     template_path.write_bytes(template_data)
             if not template_path.is_file() and isinstance(context, dict) and source_relative:
                 payload = context.get("payload", {})
-                source_project_text = str(payload.get("source_project") or "").strip()
-                if source_project_text:
-                    project_template, project_error = _project_template_for_arc_identity(
-                        Path(source_project_text),
-                        source_relative,
-                        suffix,
-                    )
-                    if project_template is not None:
-                        template_path = project_template
-                    elif project_error:
-                        diagnostics.append(project_error)
-                else:
-                    diagnostics.append("parsed-export TXT does not record a source project")
+                manifest_path = Path(context["manifest_path"]) if context.get("manifest_path") else None
+                export_roots = context.get("export_roots", [])
+                export_folder = Path(export_roots[0]) if export_roots else None
+                local_template = _standalone_local_template_for_arc_identity(
+                    payload,
+                    source_relative,
+                    suffix,
+                    manifest_path=manifest_path,
+                    export_folder=export_folder,
+                ) if isinstance(payload, dict) else None
+                if local_template is not None:
+                    template_path = local_template
 
-                if not template_path.is_file():
+                if not template_path.is_file() and isinstance(payload, dict):
+                    source_project, source_project_error = _standalone_parsed_source_project(
+                        payload,
+                        {source_relative},
+                        manifest_path=manifest_path,
+                        export_folder=export_folder,
+                    )
+                    if source_project is not None:
+                        project_template, project_error = _project_template_for_arc_identity(
+                            source_project,
+                            source_relative,
+                            suffix,
+                        )
+                        if project_template is not None:
+                            template_path = project_template
+                        elif project_error:
+                            diagnostics.append(project_error)
+                    elif source_project_error:
+                        diagnostics.append(source_project_error)
+                elif not isinstance(payload, dict):
+                    diagnostics.append("parsed-export TXT payload is invalid")
+
+                if not template_path.is_file() and isinstance(payload, dict):
                     context_key = os.path.normcase(
                         str(Path(context["manifest_path"]).resolve(strict=False))
                     )
                     if context_key not in arc_bytes_by_context:
                         try:
-                            source_arc = _standalone_parsed_source_arc(payload)
+                            source_arc = _standalone_parsed_source_arc(
+                                payload,
+                                manifest_path=manifest_path,
+                                export_folder=export_folder,
+                            )
                             arc_bytes_by_context[context_key] = _read_arc_entry_bytes_by_display_path(
                                 source_arc,
                                 required_arc_paths.get(context_key, {source_relative}),
@@ -10413,7 +10816,7 @@ def prepare_codec_items_for_new_project(
                             f"recorded original ARC has no exact entry: {source_relative}"
                         )
 
-            if not template_path.is_file() and diagnostics:
+            if not template_path.is_file() and diagnostics and writeback_template is None:
                 detail = "\n".join(f"- {item}" for item in diagnostics)
                 raise Re6ArcError(
                     f"Unable to recover the exact template for parsed import: {sidecar_path}\n"
@@ -10540,6 +10943,9 @@ def create_re6_project_from_inputs(
     source_items: list[tuple[Path, str]] = []
     for source_path, relative_name in all_source_items:
         if _path_is_inside_any(source_path, spc_bundle_roots):
+            continue
+        if is_re6_writeback_template_sidecar_path(source_path):
+            skipped_paths.append(relative_name)
             continue
         if allowed_keys is not None:
             suffix = source_path.suffix.lower()
@@ -11385,6 +11791,8 @@ def convert_supported_files_in_directory(
                     )
                 except Re6ArcError:
                     writeback_template = None
+                if not original_template_path.is_file() and target_path.is_file():
+                    original_template_path = target_path
                 _codec_kind, rebuilt_data = rebuild_and_validate_import_sidecar(
                     source_path,
                     original_template_path if original_template_path.is_file() else None,
@@ -11431,6 +11839,8 @@ def convert_supported_files_in_directory(
                     )
                 except Re6ArcError:
                     writeback_template = None
+                if not original_template_path.is_file() and target_path.is_file():
+                    original_template_path = target_path
                 _codec_kind, rebuilt_data = rebuild_and_validate_import_sidecar(
                     source_path,
                     original_template_path if original_template_path.is_file() else None,
@@ -11834,20 +12244,6 @@ def read_file_magic(path: Path, size: int = 4) -> bytes:
         return handle.read(size)
 
 
-def conversion_workspace_needs_source_copy(mode_key: str, magic: bytes) -> bool:
-    """Keep raw workspace files only when they are the visible/editable form."""
-    if mode_key == "known_formats" and magic == FORMAT_MAGIC_SPC:
-        return False
-    if mode_key in {"tex_dds", "known_formats"} and magic in {
-        FORMAT_MAGIC_TEX,
-        FORMAT_MAGIC_RTEX,
-    }:
-        return False
-    if mode_key in {"xml", "known_formats"} and magic == FORMAT_MAGIC_XFS:
-        return False
-    return True
-
-
 def choose_conversion_sidecar_path(
     source_path: Path,
     mode_key: str,
@@ -11972,27 +12368,6 @@ def conversion_artifact_signature(path: Path) -> dict[str, Any] | None:
         return {"kind": "directory", "files": files}
     except OSError:
         return None
-
-
-def iter_directory_regular_files_with_stats(
-    root: Path,
-) -> Iterator[tuple[Path, os.stat_result]]:
-    """Yield regular files with one directory-entry metadata lookup each."""
-    pending = [Path(root)]
-    while pending:
-        current = pending.pop()
-        try:
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            pending.append(Path(entry.path))
-                        elif entry.is_file(follow_symlinks=False):
-                            yield Path(entry.path), entry.stat(follow_symlinks=False)
-                    except OSError:
-                        continue
-        except OSError:
-            continue
 
 
 def build_conversion_sync_state(
@@ -12368,27 +12743,8 @@ def build_internal_conversion_workspace(
         workspace_source_path = extract_root / build_archive_relative_path(entry)
         ensure_parent(workspace_source_path)
         magic = read_file_magic(project_source_path)
-
-        def ensure_source_only_working_copy() -> None:
-            # A failed decoder can leave a partial DDS/XML next to the source
-            # identity. Source-only fallback must not expose that partial
-            # artifact as though it were a successful parse.
-            for sidecar_path in conversion_sidecar_paths(workspace_source_path, mode_key):
-                if sidecar_path.is_dir():
-                    shutil.rmtree(sidecar_path, ignore_errors=True)
-                elif sidecar_path.exists():
-                    sidecar_path.unlink(missing_ok=True)
-            if workspace_source_path.is_file():
-                return
-            if workspace_source_path.is_dir():
-                shutil.rmtree(workspace_source_path)
-            elif workspace_source_path.exists():
-                workspace_source_path.unlink()
-            ensure_parent(workspace_source_path)
+        if magic != FORMAT_MAGIC_SPC and int(entry["index"]) not in spc_futures:
             shutil.copy2(project_source_path, workspace_source_path)
-
-        if conversion_workspace_needs_source_copy(mode_key, magic) and int(entry["index"]) not in spc_futures:
-            ensure_source_only_working_copy()
 
         try:
             if progress and (entry_position == 1 or entry_position == total_entries or entry_position % 10 == 0 or magic == FORMAT_MAGIC_SPC):
@@ -12412,14 +12768,14 @@ def build_internal_conversion_workspace(
                     mode_key,
                     (".xml",),
                 )
-                xfs_helper.convert_file(project_source_path, xml_output_path, include_rtti=True)
+                xfs_helper.convert_file(workspace_source_path, xml_output_path, include_rtti=True)
                 converted_count += 1
                 continue
 
             if mode_key == "tex_dds":
                 if magic not in (FORMAT_MAGIC_TEX, FORMAT_MAGIC_RTEX):
                     continue
-                tex_kind, parsed = tex_helper.parse_texture_file(project_source_path.read_bytes())
+                tex_kind, parsed = tex_helper.parse_texture_file(workspace_source_path.read_bytes())
                 if tex_kind == "tex":
                     dds_output_path = choose_conversion_sidecar_path(
                         workspace_source_path,
@@ -12497,12 +12853,12 @@ def build_internal_conversion_workspace(
                     mode_key,
                     (".xml",),
                 )
-                xfs_helper.convert_file(project_source_path, xml_output_path, include_rtti=True)
+                xfs_helper.convert_file(workspace_source_path, xml_output_path, include_rtti=True)
                 parser_key = "xfs_xml"
                 if xml_output_path.exists():
                     parsed_files.append(xml_output_path.relative_to(extract_root).as_posix())
             elif magic in (FORMAT_MAGIC_TEX, FORMAT_MAGIC_RTEX) and tex_helper is not None:
-                tex_kind, parsed = tex_helper.parse_texture_file(project_source_path.read_bytes())
+                tex_kind, parsed = tex_helper.parse_texture_file(workspace_source_path.read_bytes())
                 if tex_kind == "tex":
                     dds_output_path = choose_conversion_sidecar_path(
                         workspace_source_path,
@@ -12607,14 +12963,13 @@ def build_internal_conversion_workspace(
                     if candidate.exists():
                         parsed_files.append(candidate.relative_to(extract_root).as_posix())
 
-            if not parser_key and mode_key == "known_formats":
+            if not parser_key and mode_key == "known_formats" and workspace_source_path.is_file():
                 # A known-format view is also the complete parsed/export view.
                 # Files such as SRD (and other formats without a CODE X
                 # decoder) are intentionally source-only, but they must still
                 # be represented by the exact same relative path.  Omitting
                 # them here makes directory export and TXT manifests silently
                 # lose real ARC entries.
-                ensure_source_only_working_copy()
                 parser_key = "source_only"
                 parsed_files = [workspace_source_path.relative_to(extract_root).as_posix()]
                 parser_meta = {
@@ -12643,44 +12998,7 @@ def build_internal_conversion_workspace(
                 }
             )
         except Exception as exc:
-            if mode_key == "known_formats":
-                # A decoder failure must never silently drop an ARC entry.
-                # Publish the exact original as a red/source-only row, which
-                # is the only honest editable form until a parser exists.
-                try:
-                    ensure_source_only_working_copy()
-                    source_relative = workspace_source_path.relative_to(extract_root).as_posix()
-                    parse_records.append(
-                        {
-                            "display_path": entry_display_path_for_ui(entry),
-                            "source_relative_path": build_archive_relative_path(entry).as_posix(),
-                            "extension": str(entry["extension"]).lower(),
-                            "parser": "source_only",
-                            "parsed_files": [source_relative],
-                            "read_only": True,
-                            "resource_window": False,
-                            "mtf_supported": False,
-                            "open_window_when_clicked": False,
-                            "open_window_during_parse_all": False,
-                            "metadata": {
-                                "format": str(entry.get("extension") or "").lower().lstrip("."),
-                                "parsed_view_policy": "same_name_source_file_only",
-                                "repack_policy": "source_only_reference",
-                                "parse_error": str(exc),
-                            },
-                        }
-                    )
-                    converted_count += 1
-                    runtime_log(
-                        "Known-format parse fell back to source-only: "
-                        f"{entry_display_path_for_ui(entry)}: {exc}"
-                    )
-                except Exception as fallback_exc:
-                    failure_messages.append(
-                        f"{entry_display_path_for_ui(entry)}: {exc}; source fallback failed: {fallback_exc}"
-                    )
-            else:
-                failure_messages.append(f"{entry_display_path_for_ui(entry)}: {exc}")
+            failure_messages.append(f"{entry_display_path_for_ui(entry)}: {exc}")
 
     if spc_executor is not None:
         spc_executor.shutdown(wait=True, cancel_futures=False)
@@ -12752,34 +13070,18 @@ def visible_conversion_workspace_signature(project_root: Path, mode_key: str) ->
     if not extract_root.exists():
         return (0, 0, 0)
     visible_exts = set(CONVERSION_SPECS[mode_key]["visible_target_exts"])
-    source_only_paths: set[str] = set()
-    if mode_key == "known_formats":
-        for record in load_known_parse_index(project_root).get("items", []):
-            if not isinstance(record, dict):
-                continue
-            parser_name = str(record.get("parser") or "").strip().casefold()
-            if parser_name not in {"source_only", *MTF_SOURCE_ONLY_PARSED_KINDS}:
-                continue
-            parsed_files = record.get("parsed_files", [])
-            if not isinstance(parsed_files, (list, tuple)):
-                continue
-            source_only_paths.update(
-                normalize_rel_posix(str(path or "")).strip("/").casefold()
-                for path in parsed_files
-                if str(path or "").strip()
-            )
     file_count = 0
     total_size = 0
     latest_mtime_ns = 0
-    for path, stat in iter_directory_regular_files_with_stats(extract_root):
+    for path in extract_root.rglob("*"):
+        if not path.is_file():
+            continue
         if path.name.lower() == "log.txt":
             continue
         extension = path.suffix.lower().lstrip(".")
-        relative_path = normalize_rel_posix(
-            path.relative_to(extract_root).as_posix()
-        ).strip("/").casefold()
-        if extension not in visible_exts and relative_path not in source_only_paths:
+        if extension not in visible_exts:
             continue
+        stat = path.stat()
         file_count += 1
         total_size += int(stat.st_size)
         latest_mtime_ns = max(latest_mtime_ns, int(stat.st_mtime_ns))
@@ -12908,10 +13210,7 @@ def sync_conversion_workspace_to_project(
             continue
         known_item = known_items_by_source.get(source_key, {})
         parser_name = str(known_item.get("parser") or "").strip().casefold()
-        if (
-            not source_path.exists()
-            and parser_name in {"source_only", *MTF_SOURCE_ONLY_PARSED_KINDS}
-        ):
+        if not source_path.exists() and parser_name != SPC_AUDIO_PARSED_KIND:
             continue
         parsed_path = find_existing_conversion_target(source_path, mode_key)
         if parsed_path is None or not parsed_path.exists():
@@ -13069,8 +13368,10 @@ class Re6ArcGuiApp:
         self.repack_tip_window: tk.Toplevel | None = None
         self._repack_tip_dock_pending = False
         self._all_files_pack_mode_active = False
+        self._github_update_found = False
+        self._github_release_url = GITHUB_RELEASE_URL
 
-        self.root.title(self.tr("RE6 ARC Tool", "RE6 ARC 工具"))
+        self._set_application_title()
         self.root.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self._restore_window_geometry()
 
@@ -13232,6 +13533,7 @@ class Re6ArcGuiApp:
         self.root.after(250, self._raise_main_window_once_on_startup)
         self.root.after(80, self._poll_native_drop_queue)
         self.root.after(AUTO_REFRESH_MS, self._auto_refresh_project_view)
+        self.root.after(600, self._start_github_update_check)
         self.root.after(1400, self._start_audio_dependency_bootstrap)
         self.set_status(
             "Ready. Drop one ARC, a supported TXT, or a TXT-backed folder.",
@@ -13241,6 +13543,64 @@ class Re6ArcGuiApp:
 
     def tr(self, english: str, chinese: str) -> str:
         return choose_ui_text(self.ui_language, english, chinese)
+
+    def _github_update_title(self) -> str:
+        return self.tr(
+            "RE6 ARC Tool | Github Release update found",
+            "RE6 ARC \u5de5\u5177 | Github Release \u9875\u9762\u53d1\u73b0\u66f4\u65b0",
+        )
+
+    def _set_application_title(self) -> None:
+        if getattr(self, "_github_update_found", False):
+            title = self._github_update_title()
+        else:
+            title = self.tr("RE6 ARC Tool", "RE6 ARC \u5de5\u5177")
+        self.root.title(title)
+        titlebar_label = getattr(self, "titlebar_title_label", None)
+        if titlebar_label is not None:
+            titlebar_label.configure(text=title)
+        update_label = getattr(self, "github_update_label", None)
+        if update_label is not None and self._github_update_found:
+            update_label.configure(text=title)
+
+    def _open_github_release(self, _event: tk.Event | None = None) -> str:
+        try:
+            webbrowser.open(self._github_release_url)
+        except Exception as exc:
+            runtime_log(f"GitHub release link open failed: {exc}")
+        return "break"
+
+    def _apply_github_update_info(self, info: dict[str, Any]) -> None:
+        if self._closing or not bool(info.get("updated")):
+            return
+        self._github_update_found = True
+        self._github_release_url = str(info.get("release_url") or GITHUB_RELEASE_URL)
+        self._set_application_title()
+        update_frame = getattr(self, "github_update_frame", None)
+        toolbar = getattr(self, "toolbar", None)
+        if update_frame is not None and toolbar is not None:
+            update_frame.pack(fill="x", before=toolbar)
+
+    def _start_github_update_check(self) -> None:
+        if self._closing:
+            return
+
+        def worker() -> None:
+            try:
+                info = fetch_github_update_info()
+            except Exception as exc:
+                runtime_log(f"GitHub update check failed: {exc}")
+                return
+            try:
+                self.root.after(0, lambda result=info: self._apply_github_update_info(result))
+            except Exception as exc:
+                runtime_log(f"GitHub update result dispatch failed: {exc}")
+
+        threading.Thread(
+            target=worker,
+            name="re6-github-update-check",
+            daemon=True,
+        ).start()
 
     def _raise_main_window_once_on_startup(self) -> None:
         """Bring the newly created main window forward once, then release it."""
@@ -18262,6 +18622,12 @@ class Re6ArcGuiApp:
             font=(UI_FONT_FAMILY, 11, "bold"),
         )
         self.style.configure(
+            "GithubUpdate.TLabel",
+            background=colors["bg"],
+            foreground="#60a5fa" if self.dark_mode_var.get() else "#2563eb",
+            font=(UI_FONT_FAMILY, 10, "underline"),
+        )
+        self.style.configure(
             "SpcSourceHint.TLabel",
             background=colors["bg"],
             foreground="#f59e0b" if self.dark_mode_var.get() else "#c2410c",
@@ -18665,7 +19031,20 @@ class Re6ArcGuiApp:
             self.window_body.pack(fill="both", expand=True)
             content_parent = self.window_body
 
-        toolbar = ttk.Frame(content_parent, padding=(10, 10, 10, 8))
+        self.github_update_frame = ttk.Frame(content_parent, padding=(10, 4, 10, 0))
+        self.github_update_frame.pack(fill="x")
+        self.github_update_label = ttk.Label(
+            self.github_update_frame,
+            text="",
+            style="GithubUpdate.TLabel",
+            cursor="hand2",
+        )
+        self.github_update_label.pack(anchor="w")
+        self.github_update_label.bind("<Button-1>", self._open_github_release)
+        self.github_update_frame.pack_forget()
+
+        self.toolbar = ttk.Frame(content_parent, padding=(10, 10, 10, 8))
+        toolbar = self.toolbar
         toolbar.pack(fill="x")
         toolbar_row_1 = ttk.Frame(toolbar)
         toolbar_row_1.pack(fill="x")
@@ -19619,9 +19998,7 @@ class Re6ArcGuiApp:
         )
 
     def _apply_language(self) -> None:
-        self.root.title(self.tr("RE6 ARC Tool", "RE6 ARC 工具"))
-        if hasattr(self, "titlebar_title_label"):
-            self.titlebar_title_label.configure(text=self.tr("RE6 ARC Tool", "RE6 ARC 工具"))
+        self._set_application_title()
         self.open_button.configure(text=self.tr("Open ARC / Folder", "加载 ARC / 目录"))
         self.restart_tool_button.configure(text=self.tr("Restart Tool", "重启工具"))
         self.switch_arc_button.configure(text=self.tr("Switch ARC", "换ARC编辑"))
@@ -25913,9 +26290,6 @@ class Re6ArcGuiApp:
             self.current_manifest,
             self.current_source_arc_path,
         )
-        # Auto-refresh compares against this baseline. Without it, an opened
-        # project can keep an empty signature map and never detect edits.
-        self._refresh_conversion_workspace_signatures()
         self._update_arc_info()
         self._populate_left_tree()
         self._restore_tree_state("left", tree_states.get("left"))
