@@ -17644,6 +17644,57 @@ class Re6ArcGuiApp:
         visit()
         return checked
 
+    def _checked_parsed_file_metas_in_tree_order(self) -> tuple[str, list[dict[str, Any]]]:
+        """Resolve the global checked source identities to parsed-pane rows."""
+        checked_keys = {
+            normalize_rel_posix(str(key)).casefold()
+            for checked_keys_for_side in self.checked_tree_entries.values()
+            for key in checked_keys_for_side
+            if str(key).strip()
+        }
+        if not checked_keys:
+            return "", []
+
+        candidate_by_key: dict[str, tuple[str, dict[str, Any]]] = {}
+        for side in [*self._visible_converted_sides(), *self.converted_pane_keys, "left"]:
+            if side != "left" and side not in self.converted_tree_meta:
+                continue
+            for meta in self._meta_for_side(side).values():
+                if meta.get("kind") != "file":
+                    continue
+                key = self._checked_key_for_meta(meta)
+                if key:
+                    candidate_by_key.setdefault(key.casefold(), (side, meta))
+
+        ordered: list[dict[str, Any]] = []
+        resolved_keys: set[str] = set()
+
+        def visit(parent: str = "") -> None:
+            for item_id in self.left_tree.get_children(parent):
+                meta = self.left_tree_meta.get(item_id)
+                if meta is not None and meta.get("kind") == "file":
+                    key = self._checked_key_for_meta(meta)
+                    normalized = key.casefold() if key else ""
+                    candidate = candidate_by_key.get(normalized)
+                    if normalized in checked_keys and candidate is not None and normalized not in resolved_keys:
+                        ordered.append(candidate[1])
+                        resolved_keys.add(normalized)
+                visit(item_id)
+
+        visit()
+        for key in sorted(checked_keys - resolved_keys):
+            candidate = candidate_by_key.get(key)
+            if candidate is not None:
+                ordered.append(candidate[1])
+                resolved_keys.add(key)
+        export_side = "right"
+        if ordered:
+            first_key = self._checked_key_for_meta(ordered[0])
+            candidate = candidate_by_key.get(first_key.casefold() if first_key else "")
+            if candidate is not None and candidate[0] != "left":
+                export_side = candidate[0]
+        return export_side, ordered
+
     def _sync_tree_item_check_value(self, side: str, item_id: str) -> None:
         tree = self._tree_for_side(side)
         meta = self._meta_for_side(side).get(item_id)
@@ -20905,6 +20956,40 @@ class Re6ArcGuiApp:
             )
         )
 
+    def _confirm_existing_export_targets(self, paths: list[Path]) -> bool:
+        existing: list[Path] = []
+        seen: set[str] = set()
+        for path in paths:
+            if not path.exists():
+                continue
+            key = str(path.resolve(strict=False)).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            existing.append(path)
+        if not existing:
+            return True
+        preview = "\n".join(str(path) for path in existing[:12])
+        if len(existing) > 12:
+            preview += f"\n... (+{len(existing) - 12} more)"
+        return self._ask_themed_confirmation(
+            parent=self.root,
+            title_en="Overwrite Existing Files?",
+            title_zh="覆盖已有文件？",
+            heading_en="Some export files already exist",
+            heading_zh="部分导出文件已经存在",
+            message_en=(
+                f"{len(existing)} file(s) already exist:\n\n{preview}\n\n"
+                "Overwrite these files?"
+            ),
+            message_zh=(
+                f"已有 {len(existing)} 个文件存在：\n\n{preview}\n\n"
+                "是否覆盖这些文件？"
+            ),
+            confirm_en="Overwrite",
+            confirm_zh="覆盖",
+        )
+
     def start_worker(self, label: str, task: Callable[[], dict[str, Any]]) -> None:
         if getattr(self, "_closing", False):
             return
@@ -21727,6 +21812,13 @@ class Re6ArcGuiApp:
         export_resolved = export_root.resolve(strict=False)
         if source_resolved == export_resolved or source_resolved in export_resolved.parents:
             raise Re6ArcError("The SPC export destination cannot be the source bundle or a child of it.")
+        existing_targets = [
+            export_root / path.relative_to(bundle_root)
+            for path in bundle_root.rglob("*")
+            if path.is_file() and (export_root / path.relative_to(bundle_root)).exists()
+        ]
+        if not self._confirm_existing_export_targets(existing_targets):
+            raise Re6ArcError("SPC resource export canceled by the user.")
         export_root.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(bundle_root, export_root, dirs_exist_ok=True)
         copied = sum(1 for path in bundle_root.rglob("*") if path.is_file())
@@ -29649,11 +29741,16 @@ class Re6ArcGuiApp:
             else:
                 destination = export_root / source_path.name
                 index = 2
-                while destination.name.casefold() in reserved:
+                while destination.name.casefold() in reserved or destination.exists():
                     destination = export_root / f"{source_path.stem} ({index}){source_path.suffix}"
                     index += 1
                 reserved.add(destination.name.casefold())
             jobs.append((source_path, destination))
+
+        if not self._confirm_existing_export_targets(
+            [destination for _source, destination in jobs]
+        ):
+            return
 
         def task() -> dict[str, Any]:
             copied = 0
@@ -30070,6 +30167,10 @@ class Re6ArcGuiApp:
         )
 
     def export_source_from_active_selection(self) -> None:
+        checked_source_metas = self._checked_source_file_metas_in_tree_order()
+        if checked_source_metas:
+            self._export_source_structure_batch("left", checked_source_metas)
+            return
         candidates = [self._active_context_tree, "left", *self._visible_converted_sides()]
         side = self._first_checked_side(candidates) or self._first_selected_side(candidates)
         if side is None:
@@ -30092,8 +30193,14 @@ class Re6ArcGuiApp:
         return True
 
     def export_parsed_from_active_selection(self) -> None:
+        side, checked_metas = self._checked_parsed_file_metas_in_tree_order()
+        if checked_metas:
+            if self._handle_yellow_lmt_json_export(side, checked_metas):
+                return
+            self._export_parsed_structure_batch(side, checked_metas)
+            return
         candidates = [self._active_context_tree, *self._visible_converted_sides(), "left"]
-        side = self._first_checked_side(candidates) or self._first_selected_side(candidates)
+        side = self._first_selected_side(candidates)
         if side is None:
             self.show_error(self.tr("Select a parsed item first.", "请先选择一个解析文件或文件夹。"))
             return
@@ -30103,70 +30210,6 @@ class Re6ArcGuiApp:
         if self._handle_yellow_lmt_json_export(side, metas):
             return
         self.export_selected_parsed_entry(side, export_mode="structure")
-
-    def _ask_parsed_export_mode(self) -> str | None:
-        """Choose between hierarchy/TXT export and flat selected-file export."""
-        if tk is None or ttk is None:
-            return "structure"
-        result: dict[str, str | None] = {"value": None}
-        dialog = tk.Toplevel(self.root)
-        dialog.title(self.tr("Choose Parsed Export Mode", "选择解析文件导出模式"))
-        dialog.transient(self.root)
-        dialog.resizable(False, False)
-        body = ttk.Frame(dialog, padding=16)
-        body.pack(fill="both", expand=True)
-
-        def close_with(value: str | None) -> None:
-            result["value"] = value
-            try:
-                dialog.grab_release()
-            except Exception:
-                pass
-            dialog.destroy()
-
-        ttk.Label(
-            body,
-            text=self.tr(
-                "Choose how to export the currently checked/selected parsed files.",
-                "请选择当前勾选或选中的解析文件导出方式。",
-            ),
-            justify="left",
-            wraplength=640,
-        ).pack(anchor="w")
-        ttk.Label(
-            body,
-            text=self.tr(
-                "Keep folders: preserve the parsed directory hierarchy and write the unpack log TXT.\n\nFiles only: copy only checked/selected files into one directory; no hierarchy and no TXT.",
-                "目录+文件结构：保留解析目录层级，并生成解压日志 TXT。\n\n仅导出选中文件：只把勾选/选中的文件复制到一个目录，不保留目录层级，也不生成 TXT。",
-            ),
-            justify="left",
-            wraplength=640,
-        ).pack(anchor="w", pady=(12, 0))
-        row = ttk.Frame(body)
-        row.pack(fill="x", pady=(18, 0))
-        ttk.Button(
-            row,
-            text=self.tr("Keep Folders + TXT", "目录结构 + TXT"),
-            command=lambda: close_with("structure"),
-        ).pack(side="left")
-        ttk.Button(
-            row,
-            text=self.tr("Files Only", "仅导出文件"),
-            command=lambda: close_with("flat"),
-        ).pack(side="left", padx=(10, 0))
-        ttk.Button(
-            row,
-            text=self.tr("Cancel", "取消"),
-            command=lambda: close_with(None),
-        ).pack(side="right")
-        dialog.protocol("WM_DELETE_WINDOW", lambda: close_with(None))
-        dialog.bind("<Escape>", lambda _event: close_with(None))
-        self._center_dialog(dialog)
-        self._apply_toplevel_theme(dialog)
-        dialog.grab_set()
-        dialog.focus_force()
-        dialog.wait_window()
-        return result["value"]
 
     def _parsed_path_for_source_meta(self, meta: dict[str, Any]) -> Path | None:
         if self.current_project_root is None or self.current_conversion_mode is None:
@@ -30207,6 +30250,8 @@ class Re6ArcGuiApp:
         self,
         metas: list[dict[str, Any]],
         export_root: Path,
+        *,
+        overwrite_existing: bool = False,
     ) -> tuple[list[tuple[str, str]], list[str], list[str]]:
         jobs: list[tuple[str, str]] = []
         missing_rows: list[str] = []
@@ -30244,7 +30289,7 @@ class Re6ArcGuiApp:
             if source_path.resolve() == destination_resolved:
                 missing_rows.append(f"{label}: export destination is the source file")
                 continue
-            if destination_path.exists():
+            if destination_path.exists() and not overwrite_existing:
                 collision_rows.append(f"{file_name} (already exists)")
                 continue
             destination_key = str(destination_resolved).casefold()
@@ -30420,6 +30465,22 @@ class Re6ArcGuiApp:
             metas,
             export_root,
         )
+        existing_targets = []
+        for meta in metas:
+            source_value = meta.get("data_path") or meta.get("source_path")
+            if source_value is None:
+                continue
+            destination = export_root / Path(source_value).name
+            if destination.exists():
+                existing_targets.append(destination)
+        if existing_targets and not self._confirm_existing_export_targets(existing_targets):
+            return
+        if existing_targets:
+            export_jobs, missing_rows, collision_rows = self._source_export_jobs_for_metas(
+                metas,
+                export_root,
+                overwrite_existing=True,
+            )
         if missing_rows or collision_rows or len(export_jobs) != len(metas):
             details = "\n".join([
                 *(f"MISSING: {item}" for item in missing_rows[:20]),
@@ -30545,10 +30606,12 @@ class Re6ArcGuiApp:
         if not export_jobs:
             self.show_error(self.tr("No source files could be exported.", "没有可导出的源文件。"))
             return
+        if not self._confirm_existing_export_targets(
+            [destination for _source, destination in export_jobs]
+        ):
+            return
 
         def task() -> dict[str, Any]:
-            if export_root.exists():
-                shutil.rmtree(export_root)
             export_root.mkdir(parents=True, exist_ok=True)
             copied = 0
             errors: list[str] = []
@@ -30618,6 +30681,10 @@ class Re6ArcGuiApp:
                     "所选条目当前没有可导出的解析文件。",
                 )
             )
+            return
+        if not self._confirm_existing_export_targets(
+            [Path(destination) for _source, destination in export_jobs]
+        ):
             return
         source_project = self.current_project_root
         source_arc = self._original_arc_reference_for_export()
@@ -30780,6 +30847,10 @@ class Re6ArcGuiApp:
         if not export_jobs:
             self.show_error(self.tr("No parsed files could be exported.", "没有成功导出任何解析文件。"))
             return
+        if not self._confirm_existing_export_targets(
+            [destination for _source, destination, _meta in export_jobs]
+        ):
+            return
         source_project = self.current_project_root
         source_arc = self._original_arc_reference_for_export()
         source_template_paths = {
@@ -30796,8 +30867,6 @@ class Re6ArcGuiApp:
         }
 
         def task() -> dict[str, Any]:
-            if export_root.exists():
-                shutil.rmtree(export_root)
             export_root.mkdir(parents=True, exist_ok=True)
             records: list[dict[str, Any]] = []
             writeback_template_helpers: dict[str, Any] = {}
@@ -30862,20 +30931,42 @@ class Re6ArcGuiApp:
         for meta in metas:
             self._open_mtf_sound_tool_directory_for_meta(meta)
 
-    def export_selected_source_entry(self, side: str) -> None:
+    def export_selected_source_entry(
+        self,
+        side: str,
+        *,
+        export_mode: str | None = None,
+    ) -> None:
+        export_structure = export_mode == "structure"
+        global_checked_metas = self._checked_source_file_metas_in_tree_order()
+        if global_checked_metas:
+            if export_structure:
+                self._export_source_structure_batch("left", global_checked_metas)
+            else:
+                self._export_source_file_batch("left", global_checked_metas)
+            return
         checked_metas = self._checked_file_metas(side)
         if checked_metas:
-            self._export_source_file_batch(side, checked_metas)
+            if export_structure:
+                self._export_source_structure_batch(side, checked_metas)
+            else:
+                self._export_source_file_batch(side, checked_metas)
             return
         selected_file_metas = self._selected_file_metas(side)
         if len(selected_file_metas) > 1:
-            self._export_source_file_batch(side, selected_file_metas)
+            if export_structure:
+                self._export_source_structure_batch(side, selected_file_metas)
+            else:
+                self._export_source_file_batch(side, selected_file_metas)
             return
         meta = self._selected_meta(side)
         if meta is None or filedialog is None:
             return
         if meta["kind"] == "file":
-            self._export_source_file_batch(side, [meta])
+            if export_structure:
+                self._export_source_structure_batch(side, [meta])
+            else:
+                self._export_source_file_batch(side, [meta])
             return
         folder_metas = self._source_file_metas_for_folder(meta)
         if not folder_metas:
@@ -30884,7 +30975,10 @@ class Re6ArcGuiApp:
                 "选中的文件夹没有可导出的源文件。",
             ))
             return
-        self._export_source_file_batch(side, folder_metas)
+        if export_structure:
+            self._export_source_structure_batch(side, folder_metas)
+        else:
+            self._export_source_file_batch(side, folder_metas)
 
     def _source_file_metas_for_folder(self, meta: dict[str, Any]) -> list[dict[str, Any]]:
         project_state = self._require_current_project()
@@ -30910,6 +31004,16 @@ class Re6ArcGuiApp:
 
     def export_selected_parsed_entry(self, side: str, *, export_mode: str | None = None) -> None:
         if self._route_lmt_handoff_from_parsed_export(side):
+            return
+        global_side, global_checked_metas = self._checked_parsed_file_metas_in_tree_order()
+        if global_checked_metas:
+            if self._handle_yellow_lmt_json_export(global_side, global_checked_metas):
+                return
+            self._export_parsed_file_batch(
+                global_side,
+                global_checked_metas,
+                export_mode=export_mode,
+            )
             return
         checked_metas = self._checked_file_metas(side)
         if checked_metas:
@@ -31016,8 +31120,17 @@ class Re6ArcGuiApp:
             )
         folder_name = PurePosixPath(folder).name or "root"
         export_root = target_dir / folder_name
-        if export_root.exists():
-            shutil.rmtree(export_root)
+        planned_targets: list[Path] = []
+        for entry in manifest["entries"]:
+            display_path = normalize_display_path(entry_display_path(entry))
+            if folder and not (display_path == folder or display_path.startswith(prefix)):
+                continue
+            source_path = project_root / Path(entry["extract_rel_path"])
+            if source_path.is_file():
+                relative_display = display_path[len(prefix) :] if prefix else display_path
+                planned_targets.append(export_root / Path(relative_display))
+        if not self._confirm_existing_export_targets(planned_targets):
+            return
         export_root.mkdir(parents=True, exist_ok=True)
         for entry in manifest["entries"]:
             display_path = normalize_display_path(entry_display_path(entry))
@@ -31077,8 +31190,24 @@ class Re6ArcGuiApp:
         extract_root = conversion_workspace_extract_root(self.current_project_root, self.current_conversion_mode)
         folder_name = PurePosixPath(folder).name or "root"
         export_root = target_dir / folder_name
-        if export_root.exists():
-            shutil.rmtree(export_root)
+        planned_targets: list[Path] = []
+        for entry in self.current_manifest["entries"]:
+            source_rel = build_archive_relative_path(entry).as_posix()
+            if folder and not source_rel.startswith(prefix):
+                continue
+            relative_source = source_rel[len(prefix) :] if prefix else source_rel
+            for path in self._parsed_paths_for_source_relative_path(source_rel):
+                if not path.is_file() or not path.exists():
+                    continue
+                try:
+                    relative_path = path.relative_to(
+                        extract_root / Path(folder) if folder else extract_root
+                    )
+                except Exception:
+                    relative_path = Path(relative_source)
+                planned_targets.append(export_root / relative_path)
+        if not self._confirm_existing_export_targets(planned_targets):
+            return
         export_root.mkdir(parents=True, exist_ok=True)
         copied = 0
         export_records: list[dict[str, Any]] = []
