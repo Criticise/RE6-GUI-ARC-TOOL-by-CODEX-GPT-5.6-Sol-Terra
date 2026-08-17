@@ -13644,8 +13644,8 @@ class Re6ArcGuiApp:
 
     def _github_update_title(self) -> str:
         return self.tr(
-            "RE6 ARC Tool | Github Release update found",
-            "RE6 ARC \u5de5\u5177 | Github Release \u9875\u9762\u53d1\u73b0\u66f4\u65b0",
+            "RE6 ARC Tool | Github Source Code Update Is Available. Click here to visit the Release page!",
+            "RE6 ARC \u5de5\u5177 | \u53d1\u73b0Github \u6e90\u7801\u66f4\u65b0\uff0c\u70b9\u51fb\u6b64\u5904\u6253\u5f00Release \u7f51\u9875\uff01",
         )
 
     def _set_application_title(self) -> None:
